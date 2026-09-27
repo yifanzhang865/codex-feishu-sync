@@ -1,0 +1,17 @@
+{
+  "name": "codex-feishu-sync",
+  "version": "0.1.0",
+  "description": "在 Codex 与飞书群聊之间双向同步会话、审批和任务状态",
+  "author": {
+    "name": "Codex Feishu Sync"
+  },
+  "interface": {
+    "displayName": "Codex Feishu Sync",
+    "shortDescription": "同步 Codex 与飞书会话",
+    "longDescription": "通过本地 Go 服务同步 Codex 可见消息、状态、审批和问题，并支持多个独立会话。",
+    "developerName": "Codex Feishu Sync",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": "检查 Codex 飞书同步状态。"
+  }
+}

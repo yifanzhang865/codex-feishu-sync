@@ -1,0 +1,20 @@
+{
+  "name": "codex-feishu-sync",
+  "interface": {
+    "displayName": "Codex Feishu Sync"
+  },
+  "plugins": [
+    {
+      "name": "codex-feishu-sync",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-feishu-sync"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

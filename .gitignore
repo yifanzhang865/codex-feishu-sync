@@ -1,0 +1,7 @@
+/dist/
+/codex-feishu
+/codex-feishu.exe
+*.test
+*.out
+.env
+.env.*
