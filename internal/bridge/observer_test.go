@@ -20,9 +20,11 @@ import (
 )
 
 type observerCodex struct {
-	thread appserver.Thread
-	writer bool
-	inputs []string
+	thread     appserver.Thread
+	writer     bool
+	inputs     []string
+	resumes    int
+	interrupts int
 }
 
 func (c *observerCodex) ListThreads(context.Context) ([]appserver.Thread, error) {
@@ -32,6 +34,7 @@ func (c *observerCodex) ReadThread(context.Context, string) (appserver.Thread, e
 	return c.thread, nil
 }
 func (c *observerCodex) ResumeThread(context.Context, string) (appserver.Thread, error) {
+	c.resumes++
 	if c.writer {
 		return appserver.Thread{}, errors.New("thread thread-a already has an active writer")
 	}
@@ -41,13 +44,22 @@ func (c *observerCodex) StartTurn(_ context.Context, _, text string) (string, er
 	c.inputs = append(c.inputs, text)
 	return "new-turn", nil
 }
-func (c *observerCodex) InterruptTurn(context.Context, string, string) error { return nil }
-func (c *observerCodex) Close() error                                        { return nil }
+func (c *observerCodex) InterruptTurn(context.Context, string, string) error {
+	c.interrupts++
+	return nil
+}
+func (c *observerCodex) Close() error { return nil }
 
-type observerFeishu struct{ messages []string }
+type observerFeishu struct {
+	messages []string
+	chatIDs  []string
+	created  []string
+	onCreate func(string)
+}
 
-func (f *observerFeishu) SendText(_ context.Context, _, text string) error {
+func (f *observerFeishu) SendText(_ context.Context, chatID, text string) error {
 	f.messages = append(f.messages, text)
+	f.chatIDs = append(f.chatIDs, chatID)
 	return nil
 }
 func (f *observerFeishu) SendCard(context.Context, string, string) error { return nil }
@@ -56,8 +68,15 @@ func (f *observerFeishu) Stop(context.Context) error                     { retur
 func (f *observerFeishu) StartMarkdownStream(context.Context, string, string, string) (channel.StreamController, error) {
 	return nil, errors.New("unexpected stream")
 }
-func (f *observerFeishu) CreateThreadChat(context.Context, string, string, string) (string, error) {
-	return "chat-a", nil
+func (f *observerFeishu) CreateThreadChat(_ context.Context, threadID, _, _ string) (string, error) {
+	f.created = append(f.created, threadID)
+	if f.onCreate != nil {
+		f.onCreate(threadID)
+	}
+	if threadID == "thread-a" {
+		return "chat-a", nil
+	}
+	return "chat-" + threadID, nil
 }
 
 func observerFixture(t *testing.T) (*Bridge, *observerCodex, *observerFeishu) {
@@ -73,6 +92,7 @@ func observerFixture(t *testing.T) (*Bridge, *observerCodex, *observerFeishu) {
 	}
 	codex := &observerCodex{writer: true, thread: appserver.Thread{
 		ID: "thread-a", SessionID: "session-a", CWD: "/work",
+		Source: json.RawMessage(`"cli"`),
 		Status: json.RawMessage(`{"type":"notLoaded"}`),
 	}}
 	feishu := &observerFeishu{}

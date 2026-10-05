@@ -64,7 +64,7 @@ func (b *Bridge) pollObserved(ctx context.Context) {
 			}
 			b.rememberThread(thread)
 			b.syncHistoryOnResume(readCtx, thread, false)
-			if queued[threadID] && !thread.IsBusy() {
+			if !b.cfg.ReadOnly && queued[threadID] && !thread.IsBusy() {
 				b.mu.Lock()
 				if b.lastTakeover == nil {
 					b.lastTakeover = make(map[string]time.Time)
@@ -87,6 +87,9 @@ func (b *Bridge) pollObserved(ctx context.Context) {
 // Caller holds the thread lock. Do not acquire another writer unless an owner
 // has explicitly sent a queued instruction from Feishu.
 func (b *Bridge) takeOverObserved(ctx context.Context, threadID string) error {
+	if b.cfg.ReadOnly {
+		return errReadOnly
+	}
 	thread, err := b.codex.ResumeThread(ctx, threadID)
 	if err != nil {
 		return err

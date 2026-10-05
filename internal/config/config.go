@@ -29,6 +29,8 @@ type Config struct {
 	InstalledBinary string     `json:"installed_binary"`
 	Marketplace     string     `json:"marketplace"`
 	AutoCreateGroup bool       `json:"auto_create_group"`
+	ReadOnly        bool       `json:"read_only"`
+	SyncAllSessions bool       `json:"sync_all_sessions"`
 }
 
 type Credentials struct {
@@ -59,6 +61,9 @@ func (cfg Config) Validate() error {
 	case AfterTurn, Streaming:
 	default:
 		return fmt.Errorf("unsupported send timing %q", cfg.SendTiming)
+	}
+	if cfg.SyncAllSessions && !cfg.ReadOnly {
+		return errors.New("sync_all_sessions requires read_only mode")
 	}
 	return nil
 }

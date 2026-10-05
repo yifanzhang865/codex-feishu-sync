@@ -11,6 +11,9 @@ import (
 )
 
 func (b *Bridge) onServerRequest(ctx context.Context, requestID json.RawMessage, method string, raw json.RawMessage) (any, error) {
+	if b.cfg.ReadOnly {
+		return nil, errReadOnly
+	}
 	var params map[string]any
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, err
@@ -137,6 +140,9 @@ func (b *Bridge) waitForAnswer(ctx context.Context, threadID string, params map[
 }
 
 func (b *Bridge) onCardAction(ctx context.Context, action feishu.CardAction) error {
+	if b.cfg.ReadOnly {
+		return nil
+	}
 	if action.SenderID != b.cfg.OwnerOpenID {
 		return nil
 	}

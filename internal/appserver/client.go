@@ -158,6 +158,9 @@ func (c *Client) ListThreads(ctx context.Context) ([]Thread, error) {
 			"sortKey":       "updated_at",
 			"sortDirection": "desc",
 			"archived":      false,
+			// An omitted provider list filters to the current provider. An
+			// explicit empty list includes conversations from every provider.
+			"modelProviders": []string{},
 		}
 		if cursor != "" {
 			params["cursor"] = cursor

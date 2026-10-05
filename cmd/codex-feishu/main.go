@@ -102,6 +102,28 @@ func setup() error {
 		return err
 	}
 	cfg.SendTiming = config.SendTiming(sendTiming)
+	defaultReadOnly := "no"
+	if cfg.ReadOnly {
+		defaultReadOnly = "yes"
+	}
+	readOnly, err := ask(reader, "仅同步回复，不接受飞书指令 yes/no", defaultReadOnly)
+	if err != nil {
+		return err
+	}
+	cfg.ReadOnly = !strings.EqualFold(readOnly, "no")
+	defaultAllSessions := "no"
+	if cfg.SyncAllSessions {
+		defaultAllSessions = "yes"
+	}
+	allSessions, err := ask(reader, "同步所有本机主会话 yes/no", defaultAllSessions)
+	if err != nil {
+		return err
+	}
+	cfg.SyncAllSessions = !strings.EqualFold(allSessions, "no")
+	if cfg.SyncAllSessions {
+		cfg.ReadOnly = true
+		fmt.Println("已启用全会话只读同步。")
+	}
 	if cfg.OwnerOpenID, err = ask(reader, "飞书 owner Open ID", cfg.OwnerOpenID); err != nil {
 		return err
 	}

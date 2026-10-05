@@ -22,6 +22,7 @@ import (
 )
 
 var errThreadNotIndexed = errors.New("Codex thread is not indexed yet")
+var errReadOnly = errors.New("只读同步模式不能提交指令或处理审批")
 
 type codexClient interface {
 	ListThreads(context.Context) ([]appserver.Thread, error)
@@ -141,6 +142,17 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	chatDone := make(chan error, 1)
 	go func() { chatDone <- b.feishu.Start(b.ctx) }()
+	if b.cfg.SyncAllSessions {
+		discoveryDone := make(chan struct{})
+		go func() {
+			defer close(discoveryDone)
+			b.observeAllSessions(b.ctx)
+		}()
+		defer func() {
+			b.cancel()
+			<-discoveryDone
+		}()
+	}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -232,24 +244,39 @@ func (b *Bridge) registerSession(registration hooks.Registration) error {
 		return errThreadNotIndexed
 	}
 	b.rememberThread(thread)
+	if b.cfg.SyncAllSessions && !syncableMainThread(thread) {
+		return nil
+	}
+	return b.ensureThread(b.ctx, thread)
+}
+
+func (b *Bridge) ensureThread(ctx context.Context, thread appserver.Thread) error {
+	return b.ensureThreadWithHistory(ctx, thread, true)
+}
+
+func (b *Bridge) ensureThreadWithHistory(ctx context.Context, thread appserver.Thread, catchLatest bool) error {
+	threadLock := b.threadLock(thread.ID)
+	threadLock.Lock()
+	defer threadLock.Unlock()
 	if _, bound := b.store.ChatForThread(thread.ID); !bound {
 		if !b.cfg.AutoCreateGroup {
 			return nil
 		}
-		if err := b.createBinding(b.ctx, thread); err != nil {
-			return err
+		if b.cfg.ReadOnly {
+			stored, err := b.codex.ReadThread(ctx, thread.ID)
+			if err != nil {
+				return err
+			}
+			thread = stored
+			if !catchLatest {
+				b.syncHistoryOnResume(ctx, thread, false)
+			}
 		}
-	}
-	return b.resume(b.ctx, thread.ID, true)
-}
-
-func (b *Bridge) ensureThread(ctx context.Context, thread appserver.Thread) error {
-	if _, bound := b.store.ChatForThread(thread.ID); !bound {
 		if err := b.createBinding(ctx, thread); err != nil {
 			return err
 		}
 	}
-	return b.resume(ctx, thread.ID, true)
+	return b.resumeLocked(ctx, thread.ID, catchLatest)
 }
 
 func (b *Bridge) createBinding(ctx context.Context, thread appserver.Thread) error {
@@ -275,10 +302,17 @@ func (b *Bridge) resume(ctx context.Context, threadID string, catchLatest bool) 
 	threadLock := b.threadLock(threadID)
 	threadLock.Lock()
 	defer threadLock.Unlock()
+	return b.resumeLocked(ctx, threadID, catchLatest)
+}
+
+func (b *Bridge) resumeLocked(ctx context.Context, threadID string, catchLatest bool) error {
 	var thread appserver.Thread
 	var err error
-	if b.isObserved(threadID) {
+	if b.cfg.ReadOnly || b.isObserved(threadID) {
 		thread, err = b.codex.ReadThread(ctx, threadID)
+		if err == nil && b.cfg.ReadOnly {
+			b.setObserved(threadID, true)
+		}
 	} else {
 		thread, err = b.codex.ResumeThread(ctx, threadID)
 		if isActiveWriterError(err) {
@@ -325,6 +359,16 @@ func supportedSource(source string) bool {
 func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) error {
 	if message.SenderID != b.cfg.OwnerOpenID {
 		return nil
+	}
+	if b.cfg.ReadOnly {
+		if _, bound := b.store.ThreadForChat(message.ChatID); !bound {
+			return nil
+		}
+		accepted, err := b.store.MarkEvent(message.EventID)
+		if err != nil || !accepted {
+			return err
+		}
+		return b.feishu.SendText(ctx, message.ChatID, "当前为只读同步，请在 Codex 中发送指令。")
 	}
 	if handled, err := b.handleApprovalText(ctx, message); handled || err != nil {
 		return err
@@ -405,6 +449,9 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 }
 
 func (b *Bridge) submit(ctx context.Context, threadID, text string) error {
+	if b.cfg.ReadOnly {
+		return errReadOnly
+	}
 	if b.isObserved(threadID) {
 		if err := b.takeOverObserved(ctx, threadID); err != nil {
 			return err
@@ -653,6 +700,9 @@ func (b *Bridge) drainQueue(ctx context.Context, threadID string) {
 }
 
 func (b *Bridge) drainQueueLocked(ctx context.Context, threadID string) {
+	if b.cfg.ReadOnly {
+		return
+	}
 	queued, err := b.store.Dequeue(threadID)
 	if err != nil || len(queued) == 0 {
 		return
@@ -676,6 +726,9 @@ func (b *Bridge) drainQueueLocked(ctx context.Context, threadID string) {
 }
 
 func (b *Bridge) flushIdleQueues(ctx context.Context) {
+	if b.cfg.ReadOnly {
+		return
+	}
 	for _, threadID := range b.store.QueuedThreads() {
 		b.mu.Lock()
 		busy := b.busy[threadID]
