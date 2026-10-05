@@ -17,11 +17,15 @@ func TestDefaultsUseVisibleConversationAndTurnCompletion(t *testing.T) {
 	if cfg.Marketplace != "codex-feishu-sync" {
 		t.Fatalf("Marketplace = %q, want codex-feishu-sync", cfg.Marketplace)
 	}
+	if !cfg.ReadOnly || !cfg.SyncAllSessions || !cfg.AutoDeleteInactiveGroups || cfg.SessionActiveHours != 72 || cfg.GroupIdleHours != 72 {
+		t.Fatalf("fresh deployment must use the 72-hour read-only lifecycle: %#v", cfg)
+	}
 }
 
 func TestAllSessionsRequiresReadOnlyAndPersists(t *testing.T) {
 	cfg := Defaults()
 	cfg.SyncAllSessions = true
+	cfg.ReadOnly = false
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("all-session discovery accepted control mode")
 	}
@@ -34,6 +38,9 @@ func TestAllSessionsRequiresReadOnlyAndPersists(t *testing.T) {
 	if err != nil || !loaded.ReadOnly || !loaded.SyncAllSessions {
 		t.Fatalf("read-only scope did not persist: %#v, %v", loaded, err)
 	}
+	if loaded.SessionActiveHours != 72 || loaded.GroupIdleHours != 72 || !loaded.AutoDeleteInactiveGroups {
+		t.Fatal("lifecycle settings did not persist")
+	}
 }
 
 func TestLegacyConfigurationPreservesControlMode(t *testing.T) {
@@ -43,8 +50,23 @@ func TestLegacyConfigurationPreservesControlMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err := Load(dir)
-	if err != nil || cfg.ReadOnly || cfg.SyncAllSessions {
+	if err != nil || cfg.ReadOnly || cfg.SyncAllSessions || cfg.AutoDeleteInactiveGroups {
 		t.Fatalf("legacy configuration changed mode: %#v, %v", cfg, err)
+	}
+}
+
+func TestInvalidLifecycleCannotDeleteGroups(t *testing.T) {
+	for _, change := range []func(*Config){
+		func(c *Config) { c.GroupIdleHours = 0 },
+		func(c *Config) { c.ReadOnly = false },
+		func(c *Config) { c.SyncAllSessions = false },
+		func(c *Config) { c.SessionActiveHours = -1 },
+	} {
+		cfg := Defaults()
+		change(&cfg)
+		if cfg.Validate() == nil {
+			t.Fatalf("unsafe lifecycle was accepted: %#v", cfg)
+		}
 	}
 }
 

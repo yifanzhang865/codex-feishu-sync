@@ -63,6 +63,9 @@ func (b *Bridge) pollObserved(ctx context.Context) {
 				return
 			}
 			b.rememberThread(thread)
+			if b.cfg.SessionActiveHours > 0 || b.cfg.AutoDeleteInactiveGroups {
+				b.recordDialogueActivity(readCtx, thread)
+			}
 			b.syncHistoryOnResume(readCtx, thread, false)
 			if !b.cfg.ReadOnly && queued[threadID] && !thread.IsBusy() {
 				b.mu.Lock()

@@ -14,6 +14,26 @@ func syncableMainThread(thread appserver.Thread) bool {
 
 // Discovery runs separately so creating groups cannot stall existing replies.
 func (b *Bridge) observeAllSessions(ctx context.Context) {
+	if b.cfg.AutoDeleteInactiveGroups {
+		workerCtx, cancel := context.WithCancel(ctx)
+		ctx = workerCtx
+		cleanupDone := make(chan struct{})
+		go func() {
+			defer close(cleanupDone)
+			b.cleanupInactiveGroups(ctx, time.Now())
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					b.cleanupInactiveGroups(ctx, now)
+				}
+			}
+		}()
+		defer func() { cancel(); <-cleanupDone }()
+	}
 	b.discoverAllSessions(ctx, true)
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -41,7 +61,7 @@ func (b *Bridge) discoverAllSessions(ctx context.Context, initial bool) {
 		// Baseline old history before group creation. Replies completed while
 		// later groups are being created remain unmarked and will be delivered.
 		for _, thread := range threads {
-			if !syncableMainThread(thread) || b.store.HistoryInitialized(thread.ID) {
+			if !b.eligibleSession(ctx, thread) || b.store.HistoryInitialized(thread.ID) {
 				continue
 			}
 			if ctx.Err() != nil {
@@ -67,10 +87,14 @@ func (b *Bridge) discoverAllSessions(ctx context.Context, initial bool) {
 		if ctx.Err() != nil {
 			return
 		}
-		if !syncableMainThread(thread) {
+		if !b.eligibleSession(ctx, thread) {
+			b.setObserved(thread.ID, false)
 			continue
 		}
 		if _, bound := b.store.ChatForThread(thread.ID); bound && b.isObserved(thread.ID) {
+			if b.cfg.AutoDeleteInactiveGroups {
+				b.recordDialogueActivity(ctx, thread)
+			}
 			observed++
 			continue
 		}

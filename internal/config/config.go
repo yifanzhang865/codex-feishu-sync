@@ -21,16 +21,19 @@ const (
 )
 
 type Config struct {
-	Region          string     `json:"region"`
-	SyncLevel       SyncLevel  `json:"sync_level"`
-	SendTiming      SendTiming `json:"send_timing"`
-	OwnerOpenID     string     `json:"owner_open_id"`
-	CodexBinary     string     `json:"codex_binary"`
-	InstalledBinary string     `json:"installed_binary"`
-	Marketplace     string     `json:"marketplace"`
-	AutoCreateGroup bool       `json:"auto_create_group"`
-	ReadOnly        bool       `json:"read_only"`
-	SyncAllSessions bool       `json:"sync_all_sessions"`
+	Region                   string     `json:"region"`
+	SyncLevel                SyncLevel  `json:"sync_level"`
+	SendTiming               SendTiming `json:"send_timing"`
+	OwnerOpenID              string     `json:"owner_open_id"`
+	CodexBinary              string     `json:"codex_binary"`
+	InstalledBinary          string     `json:"installed_binary"`
+	Marketplace              string     `json:"marketplace"`
+	AutoCreateGroup          bool       `json:"auto_create_group"`
+	ReadOnly                 bool       `json:"read_only"`
+	SyncAllSessions          bool       `json:"sync_all_sessions"`
+	SessionActiveHours       int        `json:"session_active_hours"`
+	GroupIdleHours           int        `json:"group_idle_hours"`
+	AutoDeleteInactiveGroups bool       `json:"auto_delete_inactive_groups"`
 }
 
 type Credentials struct {
@@ -40,11 +43,16 @@ type Credentials struct {
 
 func Defaults() Config {
 	return Config{
-		Region:          "feishu",
-		SyncLevel:       ConversationStatus,
-		SendTiming:      AfterTurn,
-		Marketplace:     "codex-feishu-sync",
-		AutoCreateGroup: true,
+		Region:                   "feishu",
+		SyncLevel:                ConversationStatus,
+		SendTiming:               AfterTurn,
+		Marketplace:              "codex-feishu-sync",
+		AutoCreateGroup:          true,
+		ReadOnly:                 true,
+		SyncAllSessions:          true,
+		SessionActiveHours:       72,
+		GroupIdleHours:           72,
+		AutoDeleteInactiveGroups: true,
 	}
 }
 
@@ -65,6 +73,12 @@ func (cfg Config) Validate() error {
 	if cfg.SyncAllSessions && !cfg.ReadOnly {
 		return errors.New("sync_all_sessions requires read_only mode")
 	}
+	if cfg.SessionActiveHours < 0 || cfg.SessionActiveHours > 24*365 || cfg.GroupIdleHours < 0 || cfg.GroupIdleHours > 24*365 {
+		return errors.New("session_active_hours and group_idle_hours must be between 0 and 8760")
+	}
+	if cfg.AutoDeleteInactiveGroups && (!cfg.ReadOnly || !cfg.SyncAllSessions || cfg.GroupIdleHours == 0) {
+		return errors.New("auto_delete_inactive_groups requires read_only, sync_all_sessions and positive group_idle_hours")
+	}
 	return nil
 }
 
@@ -81,7 +95,8 @@ func Load(dir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	var cfg Config
+	// Preserve legacy control flags; only the new time windows get defaults.
+	cfg := Config{SessionActiveHours: 72, GroupIdleHours: 72}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}

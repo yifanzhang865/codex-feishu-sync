@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	channel "github.com/larksuite/channel-sdk-go"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -17,6 +18,7 @@ type Inbound struct {
 	ChatID    string
 	SenderID  string
 	Text      string
+	CreatedAt time.Time
 }
 
 type CardAction struct {
@@ -68,6 +70,7 @@ func New(cfg config.Config, credentials config.Credentials) (*Client, error) {
 		return client.messageFn(ctx, Inbound{
 			EventID: message.EventID, MessageID: message.MessageID, ChatID: message.ChatID,
 			SenderID: message.UserID, Text: message.Content,
+			CreatedAt: time.UnixMilli(message.CreateTimeMs),
 		})
 	})
 	sdk.OnCardAction(func(ctx context.Context, event *channel.CardActionEvent) error {

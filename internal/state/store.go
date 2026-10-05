@@ -26,6 +26,14 @@ type persisted struct {
 	Events             map[string]bool            `json:"events"`
 	Queues             map[string][]QueuedMessage `json:"queues"`
 	HistoryInitialized map[string]bool            `json:"history_initialized"`
+	ManagedChats       map[string]ManagedChat     `json:"managed_chats,omitempty"`
+}
+
+type ManagedChat struct {
+	ChatID        string    `json:"chat_id"`
+	LastActivity  time.Time `json:"last_activity"`
+	DeletePending bool      `json:"delete_pending,omitempty"`
+	DeleteStarted bool      `json:"delete_started,omitempty"`
 }
 
 type Store struct {
@@ -44,6 +52,7 @@ func Open(dir string) (*Store, error) {
 		Events:             make(map[string]bool),
 		Queues:             make(map[string][]QueuedMessage),
 		HistoryInitialized: make(map[string]bool),
+		ManagedChats:       make(map[string]ManagedChat),
 	}}
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -82,6 +91,14 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Bind(threadID, chatID string) error {
+	return s.bind(threadID, chatID, false)
+}
+
+func (s *Store) BindManaged(threadID, chatID string) error {
+	return s.bind(threadID, chatID, true)
+}
+
+func (s *Store) bind(threadID, chatID string, managed bool) error {
 	if threadID == "" || chatID == "" {
 		return errors.New("thread_id and chat_id are required")
 	}
@@ -92,12 +109,23 @@ func (s *Store) Bind(threadID, chatID string) error {
 	}
 	previousChat, hadThread := s.data.ThreadToChat[threadID]
 	previousThread, hadChat := s.data.ChatToThread[chatID]
+	previousManaged, hadManaged := s.data.ManagedChats[threadID]
 	if previousChat != "" && previousChat != chatID {
 		delete(s.data.ChatToThread, previousChat)
 	}
 	s.data.ThreadToChat[threadID] = chatID
 	s.data.ChatToThread[chatID] = threadID
+	if managed {
+		s.data.ManagedChats[threadID] = ManagedChat{ChatID: chatID}
+	} else {
+		delete(s.data.ManagedChats, threadID)
+	}
 	if err := s.saveLocked(); err != nil {
+		if hadManaged {
+			s.data.ManagedChats[threadID] = previousManaged
+		} else {
+			delete(s.data.ManagedChats, threadID)
+		}
 		if hadThread {
 			s.data.ThreadToChat[threadID] = previousChat
 		} else {
@@ -364,5 +392,8 @@ func (s *Store) normalize() {
 	}
 	if s.data.HistoryInitialized == nil {
 		s.data.HistoryInitialized = make(map[string]bool)
+	}
+	if s.data.ManagedChats == nil {
+		s.data.ManagedChats = make(map[string]ManagedChat)
 	}
 }

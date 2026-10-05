@@ -51,10 +51,16 @@ func (c *observerCodex) InterruptTurn(context.Context, string, string) error {
 func (c *observerCodex) Close() error { return nil }
 
 type observerFeishu struct {
-	messages []string
-	chatIDs  []string
-	created  []string
-	onCreate func(string)
+	messages       []string
+	chatIDs        []string
+	created        []string
+	onCreate       func(string)
+	deleted        []string
+	deleteError    error
+	ownershipError error
+	protectChat    bool
+	humanActivity  time.Time
+	onHistory      func()
 }
 
 func (f *observerFeishu) SendText(_ context.Context, chatID, text string) error {
@@ -77,6 +83,23 @@ func (f *observerFeishu) CreateThreadChat(_ context.Context, threadID, _, _ stri
 		return "chat-a", nil
 	}
 	return "chat-" + threadID, nil
+}
+
+func (f *observerFeishu) ThreadChatCanBeDeleted(context.Context, string, string) (bool, error) {
+	return !f.protectChat, f.ownershipError
+}
+func (f *observerFeishu) LastHumanMessage(context.Context, string, time.Time) (time.Time, error) {
+	if f.onHistory != nil {
+		f.onHistory()
+	}
+	return f.humanActivity, nil
+}
+func (f *observerFeishu) DeleteThreadChat(_ context.Context, chatID string) error {
+	if f.deleteError != nil {
+		return f.deleteError
+	}
+	f.deleted = append(f.deleted, chatID)
+	return nil
 }
 
 func observerFixture(t *testing.T) (*Bridge, *observerCodex, *observerFeishu) {

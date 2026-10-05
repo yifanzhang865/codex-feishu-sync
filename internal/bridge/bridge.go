@@ -40,6 +40,9 @@ type feishuClient interface {
 	SendCard(context.Context, string, string) error
 	StartMarkdownStream(context.Context, string, string, string) (channel.StreamController, error)
 	CreateThreadChat(context.Context, string, string, string) (string, error)
+	ThreadChatCanBeDeleted(context.Context, string, string) (bool, error)
+	LastHumanMessage(context.Context, string, time.Time) (time.Time, error)
+	DeleteThreadChat(context.Context, string) error
 }
 
 type question struct {
@@ -87,6 +90,7 @@ type Bridge struct {
 	pendingApprovals map[string]pendingApproval
 	pendingByChat    map[string]string
 	pendingQuestions map[string]*pendingQuestion
+	activityTracker  *appserver.ActivityTracker
 }
 
 func New(cfg config.Config, credentials config.Credentials, codexBin string) (*Bridge, error) {
@@ -120,6 +124,7 @@ func New(cfg config.Config, credentials config.Credentials, codexBin string) (*B
 		streamErrors: make(map[string]bool),
 		echoSuppress: make(map[string][]string), pendingApprovals: make(map[string]pendingApproval),
 		pendingByChat: make(map[string]string), pendingQuestions: make(map[string]*pendingQuestion),
+		activityTracker: &appserver.ActivityTracker{},
 	}
 	b.router = router.New(store, cfg.OwnerOpenID)
 	chat.OnMessage(b.onFeishuMessage)
@@ -210,7 +215,11 @@ func (b *Bridge) recoverThreads(ctx context.Context) error {
 	bound := make(map[string]bool, len(bindings))
 	for threadID := range bindings {
 		bound[threadID] = true
-		if _, ok := b.findThread(threads, threadID); !ok {
+		thread, ok := b.findThread(threads, threadID)
+		if !ok {
+			continue
+		}
+		if b.cfg.SyncAllSessions && !b.eligibleSession(ctx, thread) {
 			continue
 		}
 		if err := b.resume(ctx, threadID, false); err != nil {
@@ -222,6 +231,9 @@ func (b *Bridge) recoverThreads(ctx context.Context) error {
 			continue
 		}
 		if !b.cfg.AutoCreateGroup {
+			continue
+		}
+		if b.cfg.SyncAllSessions && !b.eligibleSession(ctx, thread) {
 			continue
 		}
 		if err := b.ensureThread(ctx, thread); err != nil {
@@ -244,7 +256,7 @@ func (b *Bridge) registerSession(registration hooks.Registration) error {
 		return errThreadNotIndexed
 	}
 	b.rememberThread(thread)
-	if b.cfg.SyncAllSessions && !syncableMainThread(thread) {
+	if b.cfg.SyncAllSessions && !b.eligibleSession(b.ctx, thread) {
 		return nil
 	}
 	return b.ensureThread(b.ctx, thread)
@@ -258,6 +270,9 @@ func (b *Bridge) ensureThreadWithHistory(ctx context.Context, thread appserver.T
 	threadLock := b.threadLock(thread.ID)
 	threadLock.Lock()
 	defer threadLock.Unlock()
+	if b.cfg.SyncAllSessions && !b.eligibleSession(ctx, thread) {
+		return nil
+	}
 	if _, bound := b.store.ChatForThread(thread.ID); !bound {
 		if !b.cfg.AutoCreateGroup {
 			return nil
@@ -268,6 +283,9 @@ func (b *Bridge) ensureThreadWithHistory(ctx context.Context, thread appserver.T
 				return err
 			}
 			thread = stored
+			if b.cfg.SyncAllSessions && !b.eligibleSession(ctx, thread) {
+				return nil
+			}
 			if !catchLatest {
 				b.syncHistoryOnResume(ctx, thread, false)
 			}
@@ -291,8 +309,11 @@ func (b *Bridge) createBinding(ctx context.Context, thread appserver.Thread) err
 	if err != nil {
 		return err
 	}
-	if err := b.store.Bind(thread.ID, chatID); err != nil {
+	if err := b.store.BindManaged(thread.ID, chatID); err != nil {
 		return err
+	}
+	if b.cfg.SessionActiveHours > 0 || b.cfg.AutoDeleteInactiveGroups {
+		b.recordDialogueActivity(ctx, thread)
 	}
 	intro := fmt.Sprintf("Codex 会话已绑定\n项目：%s\nThread：%s", name, thread.ID)
 	return b.feishu.SendText(ctx, chatID, intro)
@@ -361,11 +382,25 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 		return nil
 	}
 	if b.cfg.ReadOnly {
-		if _, bound := b.store.ThreadForChat(message.ChatID); !bound {
+		threadID, bound := b.store.ThreadForChat(message.ChatID)
+		if !bound {
+			return nil
+		}
+		lock := b.threadLock(threadID)
+		lock.Lock()
+		defer lock.Unlock()
+		if current, ok := b.store.ChatForThread(threadID); !ok || current != message.ChatID {
 			return nil
 		}
 		accepted, err := b.store.MarkEvent(message.EventID)
 		if err != nil || !accepted {
+			return err
+		}
+		at := message.CreatedAt
+		if at.IsZero() || at.Unix() <= 0 {
+			at = time.Now()
+		}
+		if err := b.store.RecordActivity(threadID, at); err != nil {
 			return err
 		}
 		return b.feishu.SendText(ctx, message.ChatID, "当前为只读同步，请在 Codex 中发送指令。")

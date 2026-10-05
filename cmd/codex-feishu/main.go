@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -122,7 +123,38 @@ func setup() error {
 	cfg.SyncAllSessions = !strings.EqualFold(allSessions, "no")
 	if cfg.SyncAllSessions {
 		cfg.ReadOnly = true
-		fmt.Println("已启用全会话只读同步。")
+		fmt.Println("已启用本机主会话只读同步。")
+		value, err := ask(reader, "纳入最近多少小时发生对话的会话（0 表示不限）", strconv.Itoa(cfg.SessionActiveHours))
+		if err != nil {
+			return err
+		}
+		cfg.SessionActiveHours, err = strconv.Atoi(value)
+		if err != nil {
+			return errors.New("会话活动窗口必须是整数小时")
+		}
+	}
+	if cfg.ReadOnly && cfg.SyncAllSessions {
+		defaultCleanup := "no"
+		if cfg.AutoDeleteInactiveGroups {
+			defaultCleanup = "yes"
+		}
+		value, err := ask(reader, "自动解散超过期限无对话的自动创建群 yes/no", defaultCleanup)
+		if err != nil {
+			return err
+		}
+		cfg.AutoDeleteInactiveGroups = !strings.EqualFold(value, "no")
+		if cfg.AutoDeleteInactiveGroups {
+			value, err := ask(reader, "群连续多少小时无对话后解散", strconv.Itoa(cfg.GroupIdleHours))
+			if err != nil {
+				return err
+			}
+			cfg.GroupIdleHours, err = strconv.Atoi(value)
+			if err != nil {
+				return errors.New("群过期时间必须是整数小时")
+			}
+		}
+	} else {
+		cfg.AutoDeleteInactiveGroups = false
 	}
 	if cfg.OwnerOpenID, err = ask(reader, "飞书 owner Open ID", cfg.OwnerOpenID); err != nil {
 		return err

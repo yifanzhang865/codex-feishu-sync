@@ -18,6 +18,8 @@ type Thread struct {
 	Source    json.RawMessage   `json:"source"`
 	Status    json.RawMessage   `json:"status"`
 	Turns     []json.RawMessage `json:"turns"`
+	Path      string            `json:"path"`
+	UpdatedAt int64             `json:"updatedAt"`
 }
 
 func MatchRegistration(threads []Thread, registration hooks.Registration) (Thread, bool) {
