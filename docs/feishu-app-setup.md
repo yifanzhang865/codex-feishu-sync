@@ -46,6 +46,17 @@ codex-feishu setup
 
 ## 排查
 
+### CLI 会话的写入权限
+
+当本机 Codex CLI 正在使用会话时，另一个 App Server 的 `thread/resume` 可能返回
+`already has an active writer`。桥接会改用 `thread/read`，每两秒读取已完成的轮次，
+并按条目 ID 去重后同步到对应飞书群。此模式在轮次完成后发送回复，不接管 CLI
+的写入权限，也不转发内部推理。
+
+在此模式下从飞书发送的新指令会保存在本地队列中；退出对应 CLI 会话释放写入
+权限后，桥接会继续提交指令。CLI 持有写入权限期间，飞书不能直接中断它或处理
+其工具审批。`codex-feishu run` 会拒绝重复启动同一配置目录下的桥接实例。
+
 - **收不到群消息**：检查机器人在群内、`im.message.receive_v1` 已订阅、长连接/WebSocket 已启用；免 @ 消息还需要敏感权限 `im:message.group_msg`。
 - **卡片按钮无响应**：确认 `card.action.trigger` 已订阅，权限/事件调整后应用已重新发布并安装。
 - **发送消息失败**：检查机器人发送消息权限、机器人仍在目标群内，以及飞书/Lark 区域与租户匹配。

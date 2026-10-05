@@ -49,3 +49,16 @@ func TestMatchRegistrationRejectsAmbiguousSession(t *testing.T) {
 		t.Fatal("ambiguous session matched a thread")
 	}
 }
+
+func TestReadOnlyThreadBusyStateUsesLatestPersistedTurn(t *testing.T) {
+	thread := Thread{Status: json.RawMessage(`{"type":"notLoaded"}`), Turns: []json.RawMessage{
+		json.RawMessage(`{"id":"turn-a","status":"inProgress"}`),
+	}}
+	if !thread.IsBusy() {
+		t.Fatal("persisted active turn was treated as idle")
+	}
+	thread.Turns = append(thread.Turns, json.RawMessage(`{"id":"turn-b","status":"completed"}`))
+	if thread.IsBusy() {
+		t.Fatal("an older active marker overrode the latest completed turn")
+	}
+}

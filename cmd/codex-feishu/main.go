@@ -211,16 +211,21 @@ func runBridge() error {
 	if err != nil {
 		return err
 	}
+	configDir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	release, err := service.AcquireRunLock(configDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 	instance, err := bridge.New(cfg, credentials, cfg.CodexBinary)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	configDir, err := config.Dir()
-	if err != nil {
-		return err
-	}
 	logDir := filepath.Join(configDir, "logs")
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return err

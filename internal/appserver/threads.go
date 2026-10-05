@@ -57,7 +57,15 @@ func (t Thread) IsBusy() bool {
 	case "active", "inprogress", "in_progress", "running", "working":
 		return true
 	default:
-		return false
+		// A separately running CLI is not loaded in this App Server. Its
+		// persisted active turn still tells us whether it is busy.
+		if len(t.Turns) == 0 {
+			return false
+		}
+		var turn struct {
+			Status json.RawMessage `json:"status"`
+		}
+		return json.Unmarshal(t.Turns[len(t.Turns)-1], &turn) == nil && statusIsActive(turn.Status)
 	}
 }
 

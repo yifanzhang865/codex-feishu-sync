@@ -1,0 +1,99 @@
+package bridge
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"time"
+)
+
+func isActiveWriterError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already has an active writer")
+}
+
+func (b *Bridge) isObserved(threadID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.observed[threadID]
+}
+
+func (b *Bridge) setObserved(threadID string, observed bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.observed == nil {
+		b.observed = make(map[string]bool)
+	}
+	if observed {
+		b.observed[threadID] = true
+	} else {
+		delete(b.observed, threadID)
+		delete(b.lastTakeover, threadID)
+	}
+}
+
+// pollObserved forwards completed persisted turns without loading a second
+// writer. The existing item IDs provide replay and restart deduplication.
+func (b *Bridge) pollObserved(ctx context.Context) {
+	b.mu.Lock()
+	threadIDs := make([]string, 0, len(b.observed))
+	for threadID := range b.observed {
+		threadIDs = append(threadIDs, threadID)
+	}
+	b.mu.Unlock()
+	queued := make(map[string]bool)
+	for _, threadID := range b.store.QueuedThreads() {
+		queued[threadID] = true
+	}
+	for _, threadID := range threadIDs {
+		if ctx.Err() != nil {
+			return
+		}
+		func() {
+			lock := b.threadLock(threadID)
+			lock.Lock()
+			defer lock.Unlock()
+			if !b.isObserved(threadID) {
+				return
+			}
+			readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			thread, err := b.codex.ReadThread(readCtx, threadID)
+			if err != nil {
+				slog.Warn("读取 CLI 会话回复失败", "thread_id", threadID, "error", err)
+				return
+			}
+			b.rememberThread(thread)
+			b.syncHistoryOnResume(readCtx, thread, false)
+			if queued[threadID] && !thread.IsBusy() {
+				b.mu.Lock()
+				if b.lastTakeover == nil {
+					b.lastTakeover = make(map[string]time.Time)
+				}
+				due := time.Since(b.lastTakeover[threadID]) >= 10*time.Second
+				if due {
+					b.lastTakeover[threadID] = time.Now()
+				}
+				b.mu.Unlock()
+				if due {
+					if err := b.takeOverObserved(readCtx, threadID); err != nil && !isActiveWriterError(err) {
+						slog.Warn("接管已释放的 Codex 会话失败", "thread_id", threadID, "error", err)
+					}
+				}
+			}
+		}()
+	}
+}
+
+// Caller holds the thread lock. Do not acquire another writer unless an owner
+// has explicitly sent a queued instruction from Feishu.
+func (b *Bridge) takeOverObserved(ctx context.Context, threadID string) error {
+	thread, err := b.codex.ResumeThread(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	b.setObserved(threadID, false)
+	b.rememberThread(thread)
+	b.syncHistoryOnResume(ctx, thread, false)
+	slog.Info("CLI 已释放写入权限，飞书可继续控制会话", "thread_id", threadID)
+	return nil
+}

@@ -205,6 +205,21 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string) (Thread, err
 	return result.Thread, nil
 }
 
+// ReadThread reads persisted turns without acquiring the thread's writer lock.
+func (c *Client) ReadThread(ctx context.Context, threadID string) (Thread, error) {
+	response, err := c.Call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": true})
+	if err != nil {
+		return Thread{}, err
+	}
+	var result struct {
+		Thread Thread `json:"thread"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return Thread{}, fmt.Errorf("decode thread/read response: %w", err)
+	}
+	return result.Thread, nil
+}
+
 func (c *Client) StartTurn(ctx context.Context, threadID, text string) (string, error) {
 	response, err := c.Call(ctx, "turn/start", map[string]any{
 		"threadId": threadID,

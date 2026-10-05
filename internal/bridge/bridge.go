@@ -23,6 +23,24 @@ import (
 
 var errThreadNotIndexed = errors.New("Codex thread is not indexed yet")
 
+type codexClient interface {
+	ListThreads(context.Context) ([]appserver.Thread, error)
+	ReadThread(context.Context, string) (appserver.Thread, error)
+	ResumeThread(context.Context, string) (appserver.Thread, error)
+	StartTurn(context.Context, string, string) (string, error)
+	InterruptTurn(context.Context, string, string) error
+	Close() error
+}
+
+type feishuClient interface {
+	Start(context.Context) error
+	Stop(context.Context) error
+	SendText(context.Context, string, string) error
+	SendCard(context.Context, string, string) error
+	StartMarkdownStream(context.Context, string, string, string) (channel.StreamController, error)
+	CreateThreadChat(context.Context, string, string, string) (string, error)
+}
+
 type question struct {
 	ID       string `json:"id"`
 	Header   string `json:"header"`
@@ -47,8 +65,8 @@ type Bridge struct {
 	configDir   string
 	codexBin    string
 	store       *state.Store
-	feishu      *feishu.Client
-	codex       *appserver.Client
+	feishu      feishuClient
+	codex       codexClient
 	ctx         context.Context
 	cancel      context.CancelFunc
 	router      *router.Router
@@ -58,6 +76,8 @@ type Bridge struct {
 	threads          map[string]appserver.Thread
 	busy             map[string]bool
 	turnIDs          map[string]string
+	observed         map[string]bool
+	lastTakeover     map[string]time.Time
 	assistantText    map[string]*strings.Builder
 	assistantFinal   map[string]string
 	streams          map[string]channel.StreamController
@@ -93,6 +113,7 @@ func New(cfg config.Config, credentials config.Credentials, codexBin string) (*B
 		store: store, feishu: chat,
 		threadLocks: make(map[string]*sync.Mutex), threads: make(map[string]appserver.Thread),
 		busy: make(map[string]bool), turnIDs: make(map[string]string),
+		observed: make(map[string]bool), lastTakeover: make(map[string]time.Time),
 		assistantText: make(map[string]*strings.Builder), assistantFinal: make(map[string]string),
 		streams:      make(map[string]channel.StreamController),
 		streamErrors: make(map[string]bool),
@@ -141,6 +162,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 			if err := hooks.Drain(b.configDir, b.registerSession); err != nil && !errors.Is(err, errThreadNotIndexed) {
 				slog.Error("处理 Codex 会话登记失败", "error", err)
 			}
+			b.pollObserved(b.ctx)
 			b.flushIdleQueues(b.ctx)
 		}
 	}
@@ -166,6 +188,11 @@ func (b *Bridge) recoverThreads(ctx context.Context) error {
 	}
 	for _, thread := range threads {
 		b.rememberThread(thread)
+	}
+	// Pending first registrations must catch up the latest completed turn
+	// before ordinary recovery establishes a history baseline.
+	if err := hooks.Drain(b.configDir, b.registerSession); err != nil && !errors.Is(err, errThreadNotIndexed) {
+		return err
 	}
 	bindings := b.store.Bindings()
 	bound := make(map[string]bool, len(bindings))
@@ -248,7 +275,20 @@ func (b *Bridge) resume(ctx context.Context, threadID string, catchLatest bool) 
 	threadLock := b.threadLock(threadID)
 	threadLock.Lock()
 	defer threadLock.Unlock()
-	thread, err := b.codex.ResumeThread(ctx, threadID)
+	var thread appserver.Thread
+	var err error
+	if b.isObserved(threadID) {
+		thread, err = b.codex.ReadThread(ctx, threadID)
+	} else {
+		thread, err = b.codex.ResumeThread(ctx, threadID)
+		if isActiveWriterError(err) {
+			thread, err = b.codex.ReadThread(ctx, threadID)
+			if err == nil {
+				b.setObserved(threadID, true)
+				slog.Info("CLI 持有会话写入权限，改用只读轮询同步", "thread_id", threadID)
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -264,6 +304,8 @@ func (b *Bridge) rememberThread(thread appserver.Thread) {
 	b.busy[thread.ID] = thread.IsBusy()
 	if turnID := thread.ActiveTurnID(); turnID != "" {
 		b.turnIDs[thread.ID] = turnID
+	} else {
+		delete(b.turnIDs, thread.ID)
 	}
 }
 
@@ -322,14 +364,28 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 		if err := b.submit(ctx, action.ThreadID, action.Content); err != nil {
 			queueErr := b.store.PrependQueue(action.ThreadID, []state.QueuedMessage{{EventID: message.EventID, Text: action.Content}})
 			if queueErr == nil {
+				if isActiveWriterError(err) {
+					return b.feishu.SendText(ctx, message.ChatID, "此会话由本机 Codex CLI 控制，回复仍会同步。指令已排队，退出该 CLI 会话释放写入权限后会提交。")
+				}
 				return b.feishu.SendText(ctx, message.ChatID, "Codex 暂时无法接收消息，已保留在本地队列中。")
 			}
 			return errors.Join(err, queueErr)
 		}
 		return nil
 	case router.Queued:
+		if b.isObserved(action.ThreadID) {
+			return b.feishu.SendText(ctx, message.ChatID, "消息已排队，Codex 回复仍会同步。退出本机 CLI 会话释放写入权限后会提交。")
+		}
 		return b.feishu.SendText(ctx, message.ChatID, "消息已排队，会在当前轮次完成后提交。")
 	case router.Interrupt:
+		if b.isObserved(action.ThreadID) {
+			if !busy {
+				if err := b.store.PrependQueue(action.ThreadID, []state.QueuedMessage{{EventID: message.EventID, Text: action.Content, Interrupt: true}}); err != nil {
+					return err
+				}
+			}
+			return b.feishu.SendText(ctx, message.ChatID, "此会话由本机 Codex CLI 控制，无法从飞书立即中断；指令已优先排队，退出该 CLI 会话释放写入权限后会提交。")
+		}
 		if !busy {
 			return b.submit(ctx, action.ThreadID, action.Content)
 		}
@@ -349,6 +405,11 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 }
 
 func (b *Bridge) submit(ctx context.Context, threadID, text string) error {
+	if b.isObserved(threadID) {
+		if err := b.takeOverObserved(ctx, threadID); err != nil {
+			return err
+		}
+	}
 	b.suppressEcho(threadID, text)
 	b.mu.Lock()
 	previousBusy := b.busy[threadID]
@@ -621,6 +682,9 @@ func (b *Bridge) flushIdleQueues(ctx context.Context) {
 		_, known := b.threads[threadID]
 		b.mu.Unlock()
 		if known && !busy {
+			if b.isObserved(threadID) {
+				continue
+			}
 			b.drainQueue(ctx, threadID)
 		}
 	}

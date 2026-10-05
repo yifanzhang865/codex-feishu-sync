@@ -10,3 +10,6 @@ func Active() (bool, error)                   { return false, fmt.Errorf("this o
 func Stop() error                             { return fmt.Errorf("this operating system is not supported") }
 func Start() error                            { return fmt.Errorf("this operating system is not supported") }
 func RemoveInstalledBinary(path string) error { return removeFile(path) }
+func AcquireRunLock(string) (func() error, error) {
+	return nil, fmt.Errorf("this operating system is not supported")
+}
