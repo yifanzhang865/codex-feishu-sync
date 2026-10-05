@@ -501,7 +501,7 @@ func (b *Bridge) submit(ctx context.Context, threadID, text string) error {
 	if b.cfg.ReadOnly {
 		return errReadOnly
 	}
-	if b.isObserved(threadID) {
+	if b.isObserved(threadID) || (b.cfg.SyncAllSessions && !b.isControlled(threadID)) {
 		if err := b.takeOverObserved(ctx, threadID); err != nil {
 			return err
 		}

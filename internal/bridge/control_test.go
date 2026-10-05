@@ -131,6 +131,35 @@ func TestOtherFeishuUsersCannotAcquireWriter(t *testing.T) {
 	}
 }
 
+func TestExplicitContinuationOfOldBoundThreadSurvivesDiscovery(t *testing.T) {
+	for _, initiallyOccupied := range []bool{false, true} {
+		b, codex, _ := controlFixture(t)
+		b.cfg.SessionActiveHours = 72
+		thread := codex.byID["thread-a"]
+		thread.Turns = []json.RawMessage{recentTurn(time.Now().Add(-80*time.Hour), "old-reply")}
+		codex.byID[thread.ID] = thread
+		codex.thread = thread
+		codex.writer = initiallyOccupied
+		b.discoverAllSessions(context.Background(), true)
+		if b.isObserved(thread.ID) || codex.resumes != 0 {
+			t.Fatal("inactive bound thread entered automatic discovery")
+		}
+		message := feishu.Inbound{EventID: "old-continuation", ChatID: "chat-a", SenderID: "owner-a", Text: "continue this bound conversation"}
+		if err := b.onFeishuMessage(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+		if initiallyOccupied {
+			b.discoverAllSessions(context.Background(), false)
+			codex.writer = false
+			b.pollObserved(context.Background())
+			b.flushIdleQueues(context.Background())
+		}
+		if len(codex.inputs) != 1 || codex.inputs[0] != message.Text || len(b.store.QueuedThreads()) != 0 || !b.isControlled(thread.ID) {
+			t.Fatal("explicit continuation was blocked by the automatic discovery window")
+		}
+	}
+}
+
 func TestClosedControlledThreadReturnsToObservation(t *testing.T) {
 	b, codex, _ := controlFixture(t)
 	b.setControlled("thread-a", true)

@@ -65,6 +65,14 @@ func (b *Bridge) pollObserved(ctx context.Context) {
 	queued := make(map[string]bool)
 	for _, threadID := range b.store.QueuedThreads() {
 		queued[threadID] = true
+		// An explicitly requested continuation of an old bound conversation
+		// must keep retrying even when it is outside automatic discovery.
+		if b.cfg.SyncAllSessions && !b.cfg.ReadOnly && !b.isControlled(threadID) && !b.isObserved(threadID) {
+			if _, bound := b.store.ChatForThread(threadID); bound {
+				b.setObserved(threadID, true)
+				threadIDs = append(threadIDs, threadID)
+			}
+		}
 	}
 	for _, threadID := range threadIDs {
 		if ctx.Err() != nil {
