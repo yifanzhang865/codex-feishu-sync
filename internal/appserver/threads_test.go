@@ -62,3 +62,16 @@ func TestReadOnlyThreadBusyStateUsesLatestPersistedTurn(t *testing.T) {
 		t.Fatal("an older active marker overrode the latest completed turn")
 	}
 }
+
+func TestResumedIdleRuntimeOverridesAbandonedTurn(t *testing.T) {
+	thread := Thread{Status: json.RawMessage(`{"type":"idle"}`), Turns: []json.RawMessage{
+		json.RawMessage(`{"id":"abandoned-turn","status":"inProgress"}`),
+	}}
+	if thread.IsBusy() {
+		t.Fatal("idle resumed runtime stayed busy because of an abandoned CLI turn")
+	}
+	thread.Status = json.RawMessage(`{"type":"active"}`)
+	if !thread.IsBusy() {
+		t.Fatal("live active runtime was ignored")
+	}
+}

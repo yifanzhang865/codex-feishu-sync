@@ -70,14 +70,11 @@ func (cfg Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported send timing %q", cfg.SendTiming)
 	}
-	if cfg.SyncAllSessions && !cfg.ReadOnly {
-		return errors.New("sync_all_sessions requires read_only mode")
-	}
 	if cfg.SessionActiveHours < 0 || cfg.SessionActiveHours > 24*365 || cfg.GroupIdleHours < 0 || cfg.GroupIdleHours > 24*365 {
 		return errors.New("session_active_hours and group_idle_hours must be between 0 and 8760")
 	}
-	if cfg.AutoDeleteInactiveGroups && (!cfg.ReadOnly || !cfg.SyncAllSessions || cfg.GroupIdleHours == 0) {
-		return errors.New("auto_delete_inactive_groups requires read_only, sync_all_sessions and positive group_idle_hours")
+	if cfg.AutoDeleteInactiveGroups && (!cfg.SyncAllSessions || cfg.GroupIdleHours == 0) {
+		return errors.New("auto_delete_inactive_groups requires sync_all_sessions and positive group_idle_hours")
 	}
 	return nil
 }

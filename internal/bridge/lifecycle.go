@@ -183,6 +183,7 @@ func (b *Bridge) finishDeletedChat(threadID, chatID string) error {
 		return err
 	}
 	b.setObserved(threadID, false)
+	b.setControlled(threadID, false)
 	slog.Info("已解散三天未对话的飞书群", "thread_id", threadID, "chat_id", chatID)
 	return nil
 }

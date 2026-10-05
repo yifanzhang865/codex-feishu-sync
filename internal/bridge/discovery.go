@@ -91,7 +91,7 @@ func (b *Bridge) discoverAllSessions(ctx context.Context, initial bool) {
 			b.setObserved(thread.ID, false)
 			continue
 		}
-		if _, bound := b.store.ChatForThread(thread.ID); bound && b.isObserved(thread.ID) {
+		if _, bound := b.store.ChatForThread(thread.ID); bound && (b.isObserved(thread.ID) || b.isControlled(thread.ID)) {
 			if b.cfg.AutoDeleteInactiveGroups {
 				b.recordDialogueActivity(ctx, thread)
 			}
@@ -112,6 +112,6 @@ func (b *Bridge) discoverAllSessions(ctx context.Context, initial bool) {
 		}
 	}
 	if initial {
-		slog.Info("全会话只读同步初次发现完成", "observed_threads", observed)
+		slog.Info("全会话初次发现完成", "observed_threads", observed, "read_only", b.cfg.ReadOnly)
 	}
 }

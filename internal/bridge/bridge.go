@@ -81,6 +81,7 @@ type Bridge struct {
 	busy             map[string]bool
 	turnIDs          map[string]string
 	observed         map[string]bool
+	controlled       map[string]bool
 	lastTakeover     map[string]time.Time
 	assistantText    map[string]*strings.Builder
 	assistantFinal   map[string]string
@@ -118,7 +119,7 @@ func New(cfg config.Config, credentials config.Credentials, codexBin string) (*B
 		store: store, feishu: chat,
 		threadLocks: make(map[string]*sync.Mutex), threads: make(map[string]appserver.Thread),
 		busy: make(map[string]bool), turnIDs: make(map[string]string),
-		observed: make(map[string]bool), lastTakeover: make(map[string]time.Time),
+		observed: make(map[string]bool), controlled: make(map[string]bool), lastTakeover: make(map[string]time.Time),
 		assistantText: make(map[string]*strings.Builder), assistantFinal: make(map[string]string),
 		streams:      make(map[string]channel.StreamController),
 		streamErrors: make(map[string]bool),
@@ -329,9 +330,11 @@ func (b *Bridge) resume(ctx context.Context, threadID string, catchLatest bool) 
 func (b *Bridge) resumeLocked(ctx context.Context, threadID string, catchLatest bool) error {
 	var thread appserver.Thread
 	var err error
-	if b.cfg.ReadOnly || b.isObserved(threadID) {
+	// Discovery never acquires a writer. In all-session mode, only an actual
+	// Feishu instruction may resume a thread through takeOverObserved.
+	if b.cfg.ReadOnly || b.cfg.SyncAllSessions || b.isObserved(threadID) {
 		thread, err = b.codex.ReadThread(ctx, threadID)
-		if err == nil && b.cfg.ReadOnly {
+		if err == nil && (b.cfg.ReadOnly || !b.isControlled(threadID)) {
 			b.setObserved(threadID, true)
 		}
 	} else {
@@ -342,6 +345,8 @@ func (b *Bridge) resumeLocked(ctx context.Context, threadID string, catchLatest 
 				b.setObserved(threadID, true)
 				slog.Info("CLI 持有会话写入权限，改用只读轮询同步", "thread_id", threadID)
 			}
+		} else if err == nil {
+			b.setControlled(threadID, true)
 		}
 	}
 	if err != nil {
@@ -438,6 +443,15 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 	if err != nil {
 		return err
 	}
+	if action.Kind != router.Ignored {
+		at := message.CreatedAt
+		if at.IsZero() || at.Unix() <= 0 {
+			at = time.Now()
+		}
+		if err := b.store.RecordActivity(action.ThreadID, at); err != nil {
+			return err
+		}
+	}
 	switch action.Kind {
 	case router.Submit:
 		if err := b.submit(ctx, action.ThreadID, action.Content); err != nil {
@@ -531,6 +545,11 @@ func (b *Bridge) onNotification(method string, params json.RawMessage) {
 	ctx, cancel := context.WithTimeout(b.ctx, 20*time.Second)
 	defer cancel()
 	switch method {
+	case "thread/closed":
+		b.setControlled(identity.ThreadID, false)
+		if _, bound := b.store.ChatForThread(identity.ThreadID); bound {
+			b.setObserved(identity.ThreadID, true)
+		}
 	case "turn/started":
 		var notification struct {
 			ThreadID string `json:"threadId"`

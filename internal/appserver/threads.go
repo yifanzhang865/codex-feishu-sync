@@ -58,6 +58,10 @@ func (t Thread) IsBusy() bool {
 	switch strings.ToLower(status) {
 	case "active", "inprogress", "in_progress", "running", "working":
 		return true
+	case "idle":
+		// After resume, the live runtime is authoritative over a stale
+		// in-progress marker left by a terminated CLI in persisted history.
+		return false
 	default:
 		// A separately running CLI is not loaded in this App Server. Its
 		// persisted active turn still tells us whether it is busy.

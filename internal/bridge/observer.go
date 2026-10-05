@@ -25,9 +25,31 @@ func (b *Bridge) setObserved(threadID string, observed bool) {
 	}
 	if observed {
 		b.observed[threadID] = true
+		delete(b.controlled, threadID)
 	} else {
 		delete(b.observed, threadID)
 		delete(b.lastTakeover, threadID)
+	}
+}
+
+func (b *Bridge) isControlled(threadID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.controlled[threadID]
+}
+
+func (b *Bridge) setControlled(threadID string, controlled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if controlled {
+		if b.controlled == nil {
+			b.controlled = make(map[string]bool)
+		}
+		b.controlled[threadID] = true
+		delete(b.observed, threadID)
+		delete(b.lastTakeover, threadID)
+	} else {
+		delete(b.controlled, threadID)
 	}
 }
 
@@ -67,7 +89,9 @@ func (b *Bridge) pollObserved(ctx context.Context) {
 				b.recordDialogueActivity(readCtx, thread)
 			}
 			b.syncHistoryOnResume(readCtx, thread, false)
-			if !b.cfg.ReadOnly && queued[threadID] && !thread.IsBusy() {
+			// A killed CLI can leave an in-progress marker in its rollout.
+			// Resume is the authoritative writer check, even for such a marker.
+			if !b.cfg.ReadOnly && queued[threadID] {
 				b.mu.Lock()
 				if b.lastTakeover == nil {
 					b.lastTakeover = make(map[string]time.Time)
@@ -97,7 +121,7 @@ func (b *Bridge) takeOverObserved(ctx context.Context, threadID string) error {
 	if err != nil {
 		return err
 	}
-	b.setObserved(threadID, false)
+	b.setControlled(threadID, true)
 	b.rememberThread(thread)
 	b.syncHistoryOnResume(ctx, thread, false)
 	slog.Info("CLI 已释放写入权限，飞书可继续控制会话", "thread_id", threadID)

@@ -20,11 +20,13 @@ import (
 )
 
 type observerCodex struct {
-	thread     appserver.Thread
-	writer     bool
-	inputs     []string
-	resumes    int
-	interrupts int
+	thread        appserver.Thread
+	writer        bool
+	inputs        []string
+	inputThreads  []string
+	resumeThreads []string
+	resumes       int
+	interrupts    int
 }
 
 func (c *observerCodex) ListThreads(context.Context) ([]appserver.Thread, error) {
@@ -33,15 +35,19 @@ func (c *observerCodex) ListThreads(context.Context) ([]appserver.Thread, error)
 func (c *observerCodex) ReadThread(context.Context, string) (appserver.Thread, error) {
 	return c.thread, nil
 }
-func (c *observerCodex) ResumeThread(context.Context, string) (appserver.Thread, error) {
+func (c *observerCodex) ResumeThread(_ context.Context, threadID string) (appserver.Thread, error) {
 	c.resumes++
+	c.resumeThreads = append(c.resumeThreads, threadID)
 	if c.writer {
 		return appserver.Thread{}, errors.New("thread thread-a already has an active writer")
 	}
-	return c.thread, nil
+	thread := c.thread
+	thread.Status = json.RawMessage(`{"type":"idle"}`)
+	return thread, nil
 }
-func (c *observerCodex) StartTurn(_ context.Context, _, text string) (string, error) {
+func (c *observerCodex) StartTurn(_ context.Context, threadID, text string) (string, error) {
 	c.inputs = append(c.inputs, text)
+	c.inputThreads = append(c.inputThreads, threadID)
 	return "new-turn", nil
 }
 func (c *observerCodex) InterruptTurn(context.Context, string, string) error {

@@ -122,8 +122,11 @@ func setup() error {
 	}
 	cfg.SyncAllSessions = !strings.EqualFold(allSessions, "no")
 	if cfg.SyncAllSessions {
-		cfg.ReadOnly = true
-		fmt.Println("已启用本机主会话只读同步。")
+		if cfg.ReadOnly {
+			fmt.Println("已启用本机主会话只读同步。")
+		} else {
+			fmt.Println("已启用本机主会话同步；收到飞书指令后尝试恢复对应会话，CLI 占用时排队。")
+		}
 		value, err := ask(reader, "纳入最近多少小时发生对话的会话（0 表示不限）", strconv.Itoa(cfg.SessionActiveHours))
 		if err != nil {
 			return err
@@ -133,7 +136,7 @@ func setup() error {
 			return errors.New("会话活动窗口必须是整数小时")
 		}
 	}
-	if cfg.ReadOnly && cfg.SyncAllSessions {
+	if cfg.SyncAllSessions {
 		defaultCleanup := "no"
 		if cfg.AutoDeleteInactiveGroups {
 			defaultCleanup = "yes"

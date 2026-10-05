@@ -22,24 +22,21 @@ func TestDefaultsUseVisibleConversationAndTurnCompletion(t *testing.T) {
 	}
 }
 
-func TestAllSessionsRequiresReadOnlyAndPersists(t *testing.T) {
-	cfg := Defaults()
-	cfg.SyncAllSessions = true
-	cfg.ReadOnly = false
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("all-session discovery accepted control mode")
-	}
-	cfg.ReadOnly = true
-	dir := t.TempDir()
-	if err := Save(dir, cfg); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := Load(dir)
-	if err != nil || !loaded.ReadOnly || !loaded.SyncAllSessions {
-		t.Fatalf("read-only scope did not persist: %#v, %v", loaded, err)
-	}
-	if loaded.SessionActiveHours != 72 || loaded.GroupIdleHours != 72 || !loaded.AutoDeleteInactiveGroups {
-		t.Fatal("lifecycle settings did not persist")
+func TestAllSessionsAndLifecycleSupportReadOnlyAndControl(t *testing.T) {
+	for _, readOnly := range []bool{true, false} {
+		cfg := Defaults()
+		cfg.ReadOnly = readOnly
+		dir := t.TempDir()
+		if err := Save(dir, cfg); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(dir)
+		if err != nil || loaded.ReadOnly != readOnly || !loaded.SyncAllSessions {
+			t.Fatalf("session control mode did not persist: %#v, %v", loaded, err)
+		}
+		if loaded.SessionActiveHours != 72 || loaded.GroupIdleHours != 72 || !loaded.AutoDeleteInactiveGroups {
+			t.Fatal("lifecycle settings did not persist")
+		}
 	}
 }
 
@@ -58,7 +55,6 @@ func TestLegacyConfigurationPreservesControlMode(t *testing.T) {
 func TestInvalidLifecycleCannotDeleteGroups(t *testing.T) {
 	for _, change := range []func(*Config){
 		func(c *Config) { c.GroupIdleHours = 0 },
-		func(c *Config) { c.ReadOnly = false },
 		func(c *Config) { c.SyncAllSessions = false },
 		func(c *Config) { c.SessionActiveHours = -1 },
 	} {
