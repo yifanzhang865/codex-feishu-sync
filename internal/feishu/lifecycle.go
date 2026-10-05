@@ -34,6 +34,14 @@ func (c *Client) ThreadChatCanBeDeleted(ctx context.Context, chatID, threadID st
 	if response.Data == nil {
 		return false, errors.New("飞书未返回群信息")
 	}
+	// GET may succeed for dissolved chats and return only their status. Treat
+	// this as confirmed deletion so a crash after DELETE cannot strand a binding.
+	if response.Data.ChatStatus != nil && *response.Data.ChatStatus != "normal" {
+		if *response.Data.ChatStatus == "dissolved" || *response.Data.ChatStatus == "dissolved_save" {
+			return false, ErrChatDissolved
+		}
+		return false, fmt.Errorf("飞书群状态未知 %q，暂缓回收", *response.Data.ChatStatus)
+	}
 	return matchesManagedThreadChat(response.Data, threadID), nil
 }
 

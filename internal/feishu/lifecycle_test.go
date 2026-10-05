@@ -32,6 +32,57 @@ func TestCleanupChecksBindingAndProtectsHumanOwner(t *testing.T) {
 	}
 }
 
+func TestReadDissolvedChatStatusSupportsCrashRecovery(t *testing.T) {
+	for _, status := range []string{"normal", "dissolved", "dissolved_save", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				response := map[string]any{"code": 0}
+				switch r.URL.Path {
+				case "/open-apis/auth/v3/tenant_access_token/internal":
+					response["tenant_access_token"] = "fake-token"
+					response["expire"] = 7200
+				case "/open-apis/im/v1/chats/chat":
+					if r.Method != http.MethodGet {
+						t.Error("recovery probe modified the group")
+					}
+					data := map[string]any{"chat_status": status, "bot_count": "0", "user_count": "0"}
+					if status == "normal" {
+						data["description"] = "Codex thread: thread-a"
+						data["chat_mode"] = "group"
+						data["chat_type"] = "private"
+					}
+					response["data"] = data
+				default:
+					t.Errorf("unexpected API path %s", r.URL.Path)
+				}
+				_ = json.NewEncoder(w).Encode(response)
+			}))
+			defer server.Close()
+			sdk, err := channel.New("status-test-"+status, "fake-secret", channel.WithDomain(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &Client{sdk: sdk}
+			allowed, err := client.ThreadChatCanBeDeleted(context.Background(), "chat", "thread-a")
+			switch status {
+			case "normal":
+				if !allowed || err != nil {
+					t.Fatalf("normal group failed ownership check: %v, %v", allowed, err)
+				}
+			case "dissolved", "dissolved_save":
+				if allowed || !errors.Is(err, ErrChatDissolved) {
+					t.Fatalf("successful GET of dissolved group lost recovery state: %v, %v", allowed, err)
+				}
+			default:
+				if allowed || err == nil || errors.Is(err, ErrChatDissolved) {
+					t.Fatal("unknown group status did not fail closed")
+				}
+			}
+		})
+	}
+}
+
 func TestHistoryPaginationSkipsBotMessagesAndDeleteIsIdempotent(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	var pages int
