@@ -104,7 +104,7 @@ func TestAllSessionDiscoveryFindsIdleAndNewThreadsWithoutAcquiringWriters(t *tes
 	codex.listed = append(codex.listed, newThread)
 	codex.byID[newThread.ID] = newThread
 	b.discoverAllSessions(context.Background(), false)
-	if !b.isObserved(newThread.ID) || !strings.Contains(chat.messages[len(chat.messages)-1], "first reply without a hook") {
+	if !b.isObserved(newThread.ID) || !strings.Contains(chat.messages[len(chat.messages)-2], "first reply without a hook") {
 		t.Fatal("new thread first reply was missed without SessionStart")
 	}
 	if codex.resumes != 0 || len(codex.inputs) != 0 || codex.interrupts != 0 {
@@ -123,7 +123,7 @@ func TestInitialDiscoveryPreservesRepliesCompletedDuringGroupCreation(t *testing
 		codex.byID[threadID] = current
 	}
 	b.discoverAllSessions(context.Background(), true)
-	if len(chat.messages) != 2 || !strings.Contains(chat.messages[1], "answer completed while creating group") {
+	if len(chat.messages) != 3 || !strings.Contains(chat.messages[1], "answer completed while creating group") {
 		t.Fatalf("reply arriving during creation was discarded: %#v", chat.messages)
 	}
 }

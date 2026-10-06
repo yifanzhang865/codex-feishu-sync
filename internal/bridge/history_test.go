@@ -71,10 +71,10 @@ func TestSessionHookInitialHistoryCatchesUpLatestCompletedTurn(t *testing.T) {
 		},
 	}
 	plan := initialHistoryDisposition(thread, true)
-	if len(plan.baseline) != 1 || plan.baseline[0] != "codex-item:thread-a:old-item" {
+	if len(plan.baseline) != 2 || plan.baseline[1] != "codex-item:thread-a:old-item" {
 		t.Fatalf("baseline items = %#v", plan.baseline)
 	}
-	if len(plan.replay) != 1 || len(plan.replay[0]) != 1 || plan.replay[0][0]["id"] != "latest-item" {
+	if len(plan.replay) != 1 || len(plan.replay[0].Items) != 1 || plan.replay[0].Items[0]["id"] != "latest-item" {
 		t.Fatalf("replay turns = %#v", plan.replay)
 	}
 }
@@ -88,7 +88,7 @@ func TestSessionHookDoesNotReplayPreviousTurnWhenLatestTurnIsActive(t *testing.T
 		},
 	}
 	plan := initialHistoryDisposition(thread, true)
-	if len(plan.baseline) != 1 || plan.baseline[0] != "codex-item:thread-a:old-item" || len(plan.replay) != 0 {
+	if len(plan.baseline) != 2 || plan.baseline[1] != "codex-item:thread-a:old-item" || len(plan.replay) != 0 {
 		t.Fatalf("active latest turn disposition = %#v; want older turns baselined and no replay", plan)
 	}
 }
@@ -102,7 +102,7 @@ func TestResumeInitialHistoryBaselinesEveryCompletedTurn(t *testing.T) {
 		},
 	}
 	plan := initialHistoryDisposition(thread, false)
-	if len(plan.baseline) != 2 || len(plan.replay) != 0 {
+	if len(plan.baseline) != 4 || len(plan.replay) != 0 {
 		t.Fatalf("ordinary resume disposition = %#v; want every completed turn baselined", plan)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	channel "github.com/larksuite/channel-sdk-go"
@@ -32,10 +33,17 @@ type MessageHandler func(context.Context, Inbound) error
 type CardActionHandler func(context.Context, CardAction) error
 
 type Client struct {
-	sdk       channel.Channel
-	ownerID   string
-	messageFn MessageHandler
-	cardFn    CardActionHandler
+	multiMachine  bool
+	machineID     string
+	machineName   string
+	appID         string
+	relayKey      []byte
+	routingMu     sync.Mutex
+	routingChatID string
+	sdk           channel.Channel
+	ownerID       string
+	messageFn     MessageHandler
+	cardFn        CardActionHandler
 }
 
 func New(cfg config.Config, credentials config.Credentials) (*Client, error) {
@@ -62,9 +70,9 @@ func New(cfg config.Config, credentials config.Credentials) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{sdk: sdk, ownerID: cfg.OwnerOpenID}
+	client := &Client{sdk: sdk, ownerID: cfg.OwnerOpenID, multiMachine: cfg.MultiMachine, machineID: cfg.MachineID, machineName: cfg.MachineName, appID: credentials.AppID, relayKey: []byte(credentials.AppSecret), routingChatID: cfg.RoutingChatID}
 	sdk.OnMessage(func(ctx context.Context, message *channel.NormalizedMessage) error {
-		if client.messageFn == nil {
+		if client.messageFn == nil || client.multiMachine {
 			return nil
 		}
 		return client.messageFn(ctx, Inbound{
@@ -77,9 +85,13 @@ func New(cfg config.Config, credentials config.Credentials) (*Client, error) {
 		if client.cardFn == nil {
 			return nil
 		}
-		return client.cardFn(ctx, CardAction{
-			EventID: event.EventID, ChatID: event.ChatID, SenderID: event.Operator.OpenID, Value: event.Action.Value,
-		})
+		action := CardAction{EventID: event.EventID, ChatID: event.ChatID, SenderID: event.Operator.OpenID, Value: event.Action.Value}
+		if client.multiMachine {
+			if target, _ := action.Value["machine_id"].(string); target != "" {
+				return client.RelayCardAction(ctx, action)
+			}
+		}
+		return client.cardFn(ctx, action)
 	})
 	return client, nil
 }
@@ -135,7 +147,14 @@ func (c *Client) CreateThreadChat(ctx context.Context, threadID, threadName, own
 	if threadID == "" || ownerID == "" {
 		return "", errors.New("thread_id 和 owner_open_id 不能为空")
 	}
+	if c.multiMachine && c.machineName != "" {
+		threadName = "[" + c.machineName + "] " + threadName
+	}
 	body := threadChatBody(threadID, threadName, ownerID)
+	if c.multiMachine {
+		description := "Codex thread: " + threadID + "\nCodex machine: " + c.machineID
+		body.Description = &description
+	}
 	request := larkim.NewCreateChatReqBuilder().UserIdType("open_id").Body(body).Build()
 	response, err := c.sdk.RawClient().Im.V1.Chat.Create(ctx, request)
 	if err != nil {

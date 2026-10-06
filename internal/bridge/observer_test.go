@@ -151,7 +151,7 @@ func TestObserverForwardsCompletedRepliesWithoutRepeatingOrLeakingReasoning(t *t
 	}
 	codex.thread.Turns[1] = json.RawMessage(`{"id":"turn-1","status":"completed","items":[{"id":"request","type":"userMessage","content":[{"type":"text","text":"new request"}]},{"id":"private","type":"reasoning","text":"private thought"},{"id":"reply","type":"agentMessage","text":"new answer"}]}`)
 	b.pollObserved(context.Background())
-	if len(feishu.messages) != 2 || !strings.Contains(feishu.messages[1], "new answer") {
+	if len(feishu.messages) != 3 || !strings.Contains(feishu.messages[1], "new answer") || feishu.messages[2] != "状态：任务已完成。" {
 		t.Fatalf("messages = %#v", feishu.messages)
 	}
 	for _, message := range feishu.messages {
@@ -160,7 +160,7 @@ func TestObserverForwardsCompletedRepliesWithoutRepeatingOrLeakingReasoning(t *t
 		}
 	}
 	b.pollObserved(context.Background())
-	if len(feishu.messages) != 2 {
+	if len(feishu.messages) != 3 {
 		t.Fatal("unchanged history was forwarded twice")
 	}
 }
@@ -178,7 +178,7 @@ func TestPendingRegistrationCatchesLatestReplyBeforeRecoveryBaseline(t *testing.
 	if err := b.recoverThreads(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(feishu.messages) != 1 || !strings.Contains(feishu.messages[0], "latest answer") {
+	if len(feishu.messages) != 2 || !strings.Contains(feishu.messages[0], "latest answer") {
 		t.Fatalf("messages = %#v", feishu.messages)
 	}
 	if !b.store.HistoryInitialized("thread-a") {
@@ -237,5 +237,112 @@ func TestObserverInterruptQueuesInstructionWhileCLIControlsIdleOrBusyThread(t *t
 				t.Fatalf("takeover inputs = %#v", codex.inputs)
 			}
 		})
+	}
+}
+
+func TestReadOnlyTerminalStatusSurvivesRestartWithoutRepeating(t *testing.T) {
+	for _, status := range []string{"completed", "interrupted", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			b, codex, chat := observerFixture(t)
+			b.cfg.ReadOnly = true
+			codex.thread.Turns = []json.RawMessage{json.RawMessage(`{"id":"turn-a","status":"inProgress","items":[]}`)}
+			if err := b.resume(context.Background(), "thread-a", false); err != nil {
+				t.Fatal(err)
+			}
+			b.pollObserved(context.Background())
+			if len(chat.messages) != 0 {
+				t.Fatal("active turn emitted a completion")
+			}
+			raw, _ := json.Marshal(map[string]any{"id": "turn-a", "status": status, "items": []map[string]any{{"id": "reply-a", "type": "agentMessage", "text": "answer"}}})
+			codex.thread.Turns[0] = raw
+			b.pollObserved(context.Background())
+			if len(chat.messages) != 2 || !strings.HasPrefix(chat.messages[1], "状态：") {
+				t.Fatalf("terminal status missing: %#v", chat.messages)
+			}
+			if status == "completed" && chat.messages[1] != "状态：任务已完成。" {
+				t.Fatal("incorrect completion text")
+			}
+			if err := b.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := state.Open(filepath.Join(b.configDir, "state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.store = reopened
+			t.Cleanup(func() { reopened.Close() })
+			b.pollObserved(context.Background())
+			if len(chat.messages) != 2 || codex.resumes != 0 || len(codex.inputs) != 0 {
+				t.Fatal("restart repeated output or acquired a writer")
+			}
+		})
+	}
+}
+
+func TestLegacyStatusMigrationBaselinesOldRepliesButCompletesNewTurn(t *testing.T) {
+	b, codex, chat := observerFixture(t)
+	b.cfg.ReadOnly = true
+	if err := b.store.InitializeHistory("thread-a", []string{"codex-item:thread-a:old"}); err != nil {
+		t.Fatal(err)
+	}
+	codex.thread.Turns = []json.RawMessage{
+		json.RawMessage(`{"id":"old-turn","status":"completed","items":[{"id":"old","type":"agentMessage","text":"old answer"}]}`),
+		json.RawMessage(`{"id":"new-turn","status":"inProgress","items":[]}`),
+	}
+	if err := b.resume(context.Background(), "thread-a", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.messages) != 0 {
+		t.Fatal("upgrade replayed old completions")
+	}
+	codex.thread.Turns[1] = json.RawMessage(`{"id":"new-turn","status":"completed","items":[{"id":"new","type":"agentMessage","text":"new answer"}]}`)
+	b.pollObserved(context.Background())
+	if len(chat.messages) != 2 || chat.messages[1] != "状态：任务已完成。" {
+		t.Fatalf("new turn lost during migration: %#v", chat.messages)
+	}
+}
+
+type failingStatusFeishu struct {
+	*observerFeishu
+	fail bool
+}
+
+func (f *failingStatusFeishu) SendText(ctx context.Context, chatID, text string) error {
+	if f.fail && strings.HasPrefix(text, "状态：") {
+		return errors.New("temporary status send failure")
+	}
+	return f.observerFeishu.SendText(ctx, chatID, text)
+}
+
+func TestStatusRetriesFailedSendWithoutRepeatingReply(t *testing.T) {
+	b, _, chat := observerFixture(t)
+	client := &failingStatusFeishu{observerFeishu: chat, fail: true}
+	b.feishu = client
+	turn := storedTurn{ID: "turn-a", Status: json.RawMessage(`"completed"`), Items: []map[string]any{{"id": "reply-a", "type": "agentMessage", "text": "answer"}}}
+	b.syncStoredTurn(context.Background(), "thread-a", turn)
+	if len(chat.messages) != 1 || b.store.HasEvent(turnEventID("thread-a", turn)) {
+		t.Fatal("failed status was marked as delivered")
+	}
+	client.fail = false
+	b.syncStoredTurn(context.Background(), "thread-a", turn)
+	b.syncStoredTurn(context.Background(), "thread-a", turn)
+	if len(chat.messages) != 2 || chat.messages[1] != "状态：任务已完成。" {
+		t.Fatalf("status retry repeated or lost output: %#v", chat.messages)
+	}
+}
+
+func TestLiveNotificationAndPollingShareTurnStatusDedup(t *testing.T) {
+	b, _, chat := observerFixture(t)
+	raw := json.RawMessage(`{"turn":{"id":"turn-a","status":"completed","items":[{"id":"reply-a","type":"agentMessage","text":"answer"}]}}`)
+	b.finishTurn(context.Background(), "thread-a", raw)
+	var notification struct {
+		Turn storedTurn `json:"turn"`
+	}
+	if err := json.Unmarshal(raw, &notification); err != nil {
+		t.Fatal(err)
+	}
+	b.syncStoredTurn(context.Background(), "thread-a", notification.Turn)
+	if len(chat.messages) != 2 || chat.messages[1] != "状态：任务已完成。" {
+		t.Fatalf("poll duplicated the live completion: %#v", chat.messages)
 	}
 }

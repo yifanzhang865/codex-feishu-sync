@@ -1,11 +1,14 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SyncLevel string
@@ -21,6 +24,11 @@ const (
 )
 
 type Config struct {
+	MultiMachine             bool       `json:"multi_machine"`
+	MachineID                string     `json:"machine_id,omitempty"`
+	MachineName              string     `json:"machine_name,omitempty"`
+	MessagePollSeconds       int        `json:"message_poll_seconds,omitempty"`
+	RoutingChatID            string     `json:"routing_chat_id,omitempty"`
 	Region                   string     `json:"region"`
 	SyncLevel                SyncLevel  `json:"sync_level"`
 	SendTiming               SendTiming `json:"send_timing"`
@@ -43,12 +51,14 @@ type Credentials struct {
 
 func Defaults() Config {
 	return Config{
+		MultiMachine:             true,
+		MessagePollSeconds:       5,
 		Region:                   "feishu",
 		SyncLevel:                ConversationStatus,
 		SendTiming:               AfterTurn,
 		Marketplace:              "codex-feishu-sync",
 		AutoCreateGroup:          true,
-		ReadOnly:                 true,
+		ReadOnly:                 false,
 		SyncAllSessions:          true,
 		SessionActiveHours:       72,
 		GroupIdleHours:           72,
@@ -57,6 +67,12 @@ func Defaults() Config {
 }
 
 func (cfg Config) Validate() error {
+	if cfg.MessagePollSeconds != 0 && (cfg.MessagePollSeconds < 2 || cfg.MessagePollSeconds > 300) {
+		return errors.New("message_poll_seconds must be between 2 and 300")
+	}
+	if strings.ContainsAny(cfg.MachineID, "\n\r") {
+		return errors.New("machine_id must not contain line breaks")
+	}
 	if cfg.Region != "feishu" && cfg.Region != "lark" {
 		return fmt.Errorf("region must be feishu or lark")
 	}
@@ -162,6 +178,37 @@ func writeJSON(path string, value any, mode os.FileMode) error {
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
+}
+
+// Machine identity is generated once and must not be copied to another host.
+func EnsureMachine(dir string, cfg *Config) error {
+	if !cfg.MultiMachine {
+		return nil
+	}
+	changed := false
+	if cfg.MachineID == "" {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return err
+		}
+		cfg.MachineID = hex.EncodeToString(id)
+		changed = true
+	}
+	if cfg.MachineName == "" {
+		cfg.MachineName, _ = os.Hostname()
+		if cfg.MachineName == "" {
+			cfg.MachineName = cfg.MachineID[:min(8, len(cfg.MachineID))]
+		}
+		changed = true
+	}
+	if cfg.MessagePollSeconds == 0 {
+		cfg.MessagePollSeconds = 5
+		changed = true
+	}
+	if changed {
+		return Save(dir, *cfg)
 	}
 	return nil
 }

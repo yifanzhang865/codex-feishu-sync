@@ -280,3 +280,81 @@ func TestBindingCountReadsStateWithoutRewritingIt(t *testing.T) {
 		t.Fatal("BindingCount() rewrote the state file")
 	}
 }
+
+func TestPollingInboxPersistsOrderCursorAndDedupAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"second-alphabetically", "first-alphabetically"} {
+		if err := s.QueueDelivery(Delivery{ID: id, ChatID: "chat", Kind: "message", Payload: []byte(`{"Text":"instruction"}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetFeishuCursor("chat", 2000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFeishuCursor("chat", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDeliveryStatus("second-alphabetically", "processing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	items := s.Deliveries()
+	if len(items) != 2 || items[0].ID != "second-alphabetically" || items[0].Status != "processing" || items[1].Sequence <= items[0].Sequence {
+		t.Fatalf("lost delivery order/state: %#v", items)
+	}
+	if n, ok := s.FeishuCursor("chat"); !ok || n != 2000 {
+		t.Fatal("cursor was lost or moved backwards")
+	}
+	if err := s.FinishDelivery(items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueDelivery(items[0]); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Deliveries()) != 1 || !s.HasEvent(items[0].ID) {
+		t.Fatal("finished event re-entered the inbox")
+	}
+}
+
+func TestPollingPersistenceFailureDoesNotAdvanceCursorOrConsumeDelivery(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueDelivery(Delivery{ID: "message", ChatID: "chat", Kind: "message", Payload: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFeishuCursor("chat", 1000); err != nil {
+		t.Fatal(err)
+	}
+	original := s.dir
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.dir = blocker
+	if err := s.SetFeishuCursor("chat", 2000); err == nil {
+		t.Fatal("failed cursor write was accepted")
+	}
+	if err := s.FinishDelivery("message"); err == nil {
+		t.Fatal("failed completion write was accepted")
+	}
+	if n, _ := s.FeishuCursor("chat"); n != 1000 || len(s.Deliveries()) != 1 || s.HasEvent("message") {
+		t.Fatal("failed transaction changed in-memory state")
+	}
+	s.dir = original
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

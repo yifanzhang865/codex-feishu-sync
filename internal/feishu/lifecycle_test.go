@@ -156,3 +156,17 @@ func TestOnlyHumanMessagesRenewGroupActivity(t *testing.T) {
 		t.Fatal("recovery error categories were lost")
 	}
 }
+
+func TestCleanupProtectsAnotherMachinesManagedGroup(t *testing.T) {
+	chat := &larkim.GetChatRespData{Description: stringPtr("Codex thread: thread-a\nCodex machine: host-b"), ChatMode: stringPtr("group"), ChatType: stringPtr("private")}
+	if matchesManagedThreadChat(chat, "thread-a", "host-a") {
+		t.Fatal("another host's group could be deleted")
+	}
+	if !matchesManagedThreadChat(chat, "thread-a", "host-b") {
+		t.Fatal("own managed group was not recognized")
+	}
+	chat.Description = stringPtr("Codex thread: thread-a")
+	if !matchesManagedThreadChat(chat, "thread-a", "host-b") {
+		t.Fatal("legacy managed group lost upgrade compatibility")
+	}
+}

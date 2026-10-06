@@ -105,6 +105,9 @@ func New(cfg config.Config, credentials config.Credentials, codexBin string) (*B
 	if err != nil {
 		return nil, err
 	}
+	if err := config.EnsureMachine(configDir, &cfg); err != nil {
+		return nil, err
+	}
 	store, err := state.Open(filepath.Join(configDir, "state"))
 	if err != nil {
 		return nil, err
@@ -145,6 +148,29 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer client.Close()
 	if err := b.recoverThreads(b.ctx); err != nil {
 		return err
+	}
+	if b.cfg.MultiMachine {
+		transport, ok := b.feishu.(machineTransport)
+		if !ok {
+			return errors.New("飞书客户端不支持多机路由")
+		}
+		mailbox, err := transport.EnsureRoutingChat(b.ctx)
+		if err != nil {
+			return err
+		}
+		b.cfg.RoutingChatID = mailbox
+		if err := config.Save(b.configDir, b.cfg); err != nil {
+			return err
+		}
+		if _, ok := b.store.FeishuCursor(mailbox); !ok {
+			if err := b.store.SetFeishuCursor(mailbox, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+		slog.Info("无网关多机路由已启用", "machine_name", b.cfg.MachineName, "message_poll_seconds", b.cfg.MessagePollSeconds)
+		pollDone := make(chan struct{})
+		go func() { defer close(pollDone); b.runMachinePolling(b.ctx, transport, mailbox) }()
+		defer func() { b.cancel(); <-pollDone }()
 	}
 	chatDone := make(chan error, 1)
 	go func() { chatDone <- b.feishu.Start(b.ctx) }()
@@ -306,9 +332,15 @@ func (b *Bridge) createBinding(ctx context.Context, thread appserver.Thread) err
 	if name == "" {
 		name = filepath.Base(thread.CWD)
 	}
+	started := time.Now().Add(-time.Second).UnixMilli()
 	chatID, err := b.feishu.CreateThreadChat(ctx, thread.ID, name, b.cfg.OwnerOpenID)
 	if err != nil {
 		return err
+	}
+	if b.cfg.MultiMachine {
+		if err := b.store.SetFeishuCursor(chatID, started); err != nil {
+			return err
+		}
 	}
 	if err := b.store.BindManaged(thread.ID, chatID); err != nil {
 		return err
@@ -682,11 +714,7 @@ func (b *Bridge) finishTurn(ctx context.Context, threadID string, params json.Ra
 	threadLock.Lock()
 	defer threadLock.Unlock()
 	var notification struct {
-		Turn struct {
-			Status json.RawMessage  `json:"status"`
-			Error  json.RawMessage  `json:"error"`
-			Items  []map[string]any `json:"items"`
-		} `json:"turn"`
+		Turn storedTurn `json:"turn"`
 	}
 	_ = json.Unmarshal(params, &notification)
 	status := statusValue(notification.Turn.Status)
@@ -708,6 +736,9 @@ func (b *Bridge) finishTurn(ctx context.Context, threadID string, params json.Ra
 	stream := b.streams[threadID]
 	delete(b.streams, threadID)
 	b.busy[threadID] = false
+	if notification.Turn.ID == "" {
+		notification.Turn.ID = b.turnIDs[threadID]
+	}
 	delete(b.turnIDs, threadID)
 	b.mu.Unlock()
 	if stream != nil {
@@ -723,7 +754,7 @@ func (b *Bridge) finishTurn(ctx context.Context, threadID string, params json.Ra
 	if shouldFallbackAssistant(assistant != "", bound, streamDelivered, hasAssistant, assistantFullyDelivered) {
 		b.sendEvent(ctx, threadID, events.Event{Kind: events.AssistantMessage, Text: assistant})
 	}
-	b.sendStatus(ctx, threadID, message)
+	b.sendTurnStatus(ctx, threadID, notification.Turn, message)
 	b.drainQueueLocked(ctx, threadID)
 }
 

@@ -5,10 +5,12 @@ Codex Feishu Sync 是一个可单独安装的 Codex 插件与本地 Go 桥接服
 ## 功能
 
 - 支持飞书和 Lark，使用官方 Go Channel SDK 建立 WebSocket 长连接。
+- 支持无网关多机路由：两台机器共享 App ID、App Secret、owner，通过飞书消息历史和机器人专用路由群转交指令与审批，不需要互相开放端口或连接第一台机器。
+- CLI/VS Code 在本机完成轮次后，也会向绑定群发送“任务已完成。”；只读同步与飞书控制共用轮次去重记录，失败和中断发送对应状态。
 - 支持 Codex CLI 和可由本机 App Server 列出的 VS Code 会话。
 - 支持全会话只读同步：自动发现本机已有和新增的 CLI/VS Code 主会话，覆盖 tmux 中恢复的会话，无需依赖 `SessionStart` hook；不接管写入权限，不接受飞书指令或审批。
 - 支持全会话发现与双向控制同时启用：发现阶段只观察会话，只有收到 owner 的飞书指令才尝试恢复对应会话；CLI 占用时排队，退出后接续。
-- 默认只读同步最近 72 小时有真实对话的主会话；自动创建的群连续 72 小时无对话后自动解散，会话重新活跃后重新建群。Codex 本地记录始终保留。
+- 默认同步最近 72 小时有真实对话的主会话，并启用飞书自动接续；自动创建的群连续 72 小时无对话后自动解散，会话重新活跃后重新建群。Codex 本地记录始终保留。
 - 每个 thread 可自动创建私有群，也可手动绑定已有群；手动绑定群不自动解散。
 - 飞书消息发送到对应 thread；忙碌时排队，`/interrupt <指令>` 请求中断当前轮次并优先提交该指令。若当前轮次编号暂不可用，指令仍会优先排队，并在群里明确提示无法立即中断。
 - 飞书卡片可通过或拒绝工具审批；Codex 的问题可在对应群里用自由文本回答。
@@ -43,7 +45,7 @@ codex plugin add codex-feishu-sync@codex-feishu-sync
 codex-feishu setup
 ```
 
-`setup` 会交互式检查飞书凭据、保存用户级配置、将可执行文件安装到 Codex CLI 所在目录，并安装和启动当前用户的系统服务。配置所需的应用权限见[飞书应用配置](docs/feishu-app-setup.md)。
+`setup` 会交互式检查飞书凭据与多机路由权限、保存用户级配置、将可执行文件安装到 Codex CLI 所在目录，并安装和启动当前用户的系统服务。使用 tmux 时运行 `codex-feishu setup --no-service`，然后在 tmux 中启动 `codex-feishu run`。配置所需的应用权限见[飞书应用配置](docs/feishu-app-setup.md)。
 
 安装后可检查服务和本机 thread：
 
@@ -52,6 +54,12 @@ codex-feishu status
 codex-feishu threads
 codex-feishu diagnose
 ```
+
+## 第二台机器
+
+第二台机器从本仓库构建后，运行 `codex-feishu setup --no-service`，输入同一组应用凭据和 owner，保留“多机路由” `yes`，再用 tmux 启动即可。机器 ID 自动独立生成，新增会话群名包含本机名称。完整命令、权限和升级步骤见[多机部署](docs/multi-machine.md)。旧配置需要显式启用 `multi_machine: true`；完成通知不依赖此开关。
+
+两台机器各自连接飞书，并持有各自的 Codex 会话。不要复制另一台的整个配置目录、`machine_id`、群绑定或状态；手动绑定时，一个群只绑定到一台机器。
 
 ## 绑定已有群
 
@@ -65,12 +73,14 @@ codex-feishu bind --thread <thread_id> --chat <chat_id>
 
 ## 配置与数据
 
-全会话只读同步可在 `setup` 中选择“同步所有本机主会话”，或在本机
-`config.json` 中设置以下字段后重启桥接服务：
+新部署默认启用全会话同步与飞书自动接续。在 `setup` 中保留“仅同步回复，不接受飞书指令”的默认值 `no`，并选择“同步所有本机主会话” `yes`；对应的本机
+`config.json` 配置如下：
 
 ```json
 {
-  "read_only": true,
+  "read_only": false,
+  "multi_machine": true,
+  "message_poll_seconds": 5,
   "sync_all_sessions": true,
   "auto_create_group": true,
   "session_active_hours": 72,
@@ -78,6 +88,8 @@ codex-feishu bind --thread <thread_id> --chat <chat_id>
   "group_idle_hours": 72
 }
 ```
+
+CLI 使用会话时，桥接观察并同步回复；飞书指令在 CLI 占用时排队，CLI 正常退出后自动恢复同一会话执行。只需一次启用该模式，不必在每次关闭 CLI 后手动切换。需要只读同步时，可显式设置 `read_only: true`。
 
 新安装的向导默认启用上述配置。升级时把这些字段合并到现有配置，保留原应用
 及 owner 设置；旧配置不会被静默开启自动解散。`session_active_hours: 0` 可恢复
@@ -113,7 +125,7 @@ codex-feishu bind --thread <thread_id> --chat <chat_id>
 
 设置向导会把配置和状态写入当前操作系统的用户配置目录下的 `codex-feishu-sync` 子目录。应用 Secret 单独保存在 `credentials.json`；Unix 系统目录权限为 `0700`，凭据文件权限为 `0600`。Windows 使用当前用户配置目录的访问控制。
 
-本地状态包括 thread 与群的绑定、飞书事件和 Codex 条目去重记录、历史基线、尚未提交的飞书消息队列和服务日志。排队中的飞书消息会暂存为明文 JSON 文件；应按本机 Codex 数据的敏感级别保护用户配置目录。插件 hook 仅暂存 thread/session 标识、工作目录和来源，不保存 prompt。
+本地状态包括 thread 与群的绑定、飞书事件和 Codex 条目/轮次去重记录、消息历史读取位置、持久化消息收件箱、历史基线、尚未提交的飞书消息队列和服务日志。排队中的飞书消息会暂存为明文 JSON 文件；应按本机 Codex 数据的敏感级别保护用户配置目录。插件 hook 仅暂存 thread/session 标识、工作目录和来源，不保存 prompt。
 
 ## 卸载与清理
 

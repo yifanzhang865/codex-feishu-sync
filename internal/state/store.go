@@ -20,7 +20,19 @@ type QueuedMessage struct {
 	AddedAt   time.Time `json:"added_at"`
 }
 
+type Delivery struct {
+	Sequence uint64          `json:"sequence"`
+	ID       string          `json:"id"`
+	Kind     string          `json:"kind"`
+	ChatID   string          `json:"chat_id"`
+	Payload  json.RawMessage `json:"payload"`
+	Status   string          `json:"status"`
+}
+
 type persisted struct {
+	NextDelivery       uint64                     `json:"next_delivery,omitempty"`
+	FeishuCursors      map[string]int64           `json:"feishu_cursors,omitempty"`
+	Deliveries         map[string]Delivery        `json:"deliveries,omitempty"`
 	ThreadToChat       map[string]string          `json:"thread_to_chat"`
 	ChatToThread       map[string]string          `json:"chat_to_thread"`
 	Events             map[string]bool            `json:"events"`
@@ -47,6 +59,8 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
 	store := &Store{dir: dir, data: persisted{
+		FeishuCursors:      make(map[string]int64),
+		Deliveries:         make(map[string]Delivery),
 		ThreadToChat:       make(map[string]string),
 		ChatToThread:       make(map[string]string),
 		Events:             make(map[string]bool),
@@ -371,6 +385,10 @@ func (s *Store) saveLocked() error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -378,6 +396,12 @@ func (s *Store) saveLocked() error {
 }
 
 func (s *Store) normalize() {
+	if s.data.FeishuCursors == nil {
+		s.data.FeishuCursors = make(map[string]int64)
+	}
+	if s.data.Deliveries == nil {
+		s.data.Deliveries = make(map[string]Delivery)
+	}
 	if s.data.ThreadToChat == nil {
 		s.data.ThreadToChat = make(map[string]string)
 	}
@@ -396,4 +420,122 @@ func (s *Store) normalize() {
 	if s.data.ManagedChats == nil {
 		s.data.ManagedChats = make(map[string]ManagedChat)
 	}
+}
+
+// MarkEvents atomically records a migration/history baseline without sending it.
+func (s *Store) MarkEvents(ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var added []string
+	for _, id := range ids {
+		if id != "" && !s.data.Events[id] {
+			s.data.Events[id] = true
+			added = append(added, id)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		for _, id := range added {
+			delete(s.data.Events, id)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Store) FeishuCursor(chatID string) (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.data.FeishuCursors[chatID]
+	return n, ok
+}
+func (s *Store) SetFeishuCursor(chatID string, millis int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, exists := s.data.FeishuCursors[chatID]
+	if exists && old >= millis {
+		return nil
+	}
+	s.data.FeishuCursors[chatID] = millis
+	if err := s.saveLocked(); err != nil {
+		if exists {
+			s.data.FeishuCursors[chatID] = old
+		} else {
+			delete(s.data.FeishuCursors, chatID)
+		}
+		return err
+	}
+	return nil
+}
+func (s *Store) QueueDelivery(d Delivery) error {
+	if d.ID == "" || d.ChatID == "" || !json.Valid(d.Payload) {
+		return errors.New("delivery ID, chat and JSON payload are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Events[d.ID] {
+		return nil
+	}
+	if _, ok := s.data.Deliveries[d.ID]; ok {
+		return nil
+	}
+	previousSequence := s.data.NextDelivery
+	s.data.NextDelivery++
+	d.Sequence = s.data.NextDelivery
+	d.Status = "pending"
+	d.Payload = append(json.RawMessage(nil), d.Payload...)
+	s.data.Deliveries[d.ID] = d
+	if err := s.saveLocked(); err != nil {
+		delete(s.data.Deliveries, d.ID)
+		s.data.NextDelivery = previousSequence
+		return err
+	}
+	return nil
+}
+func (s *Store) Deliveries() []Delivery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Delivery, 0, len(s.data.Deliveries))
+	for _, d := range s.data.Deliveries {
+		d.Payload = append(json.RawMessage(nil), d.Payload...)
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Sequence < out[j].Sequence })
+	return out
+}
+func (s *Store) SetDeliveryStatus(id, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.data.Deliveries[id]
+	if !ok {
+		return errors.New("delivery not found")
+	}
+	previous := d
+	d.Status = status
+	s.data.Deliveries[id] = d
+	if err := s.saveLocked(); err != nil {
+		s.data.Deliveries[id] = previous
+		return err
+	}
+	return nil
+}
+func (s *Store) FinishDelivery(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.data.Deliveries[id]
+	marked := s.data.Events[id]
+	s.data.Events[id] = true
+	delete(s.data.Deliveries, id)
+	if err := s.saveLocked(); err != nil {
+		if !marked {
+			delete(s.data.Events, id)
+		}
+		if ok {
+			s.data.Deliveries[id] = d
+		}
+		return err
+	}
+	return nil
 }

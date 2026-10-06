@@ -17,8 +17,8 @@ func TestDefaultsUseVisibleConversationAndTurnCompletion(t *testing.T) {
 	if cfg.Marketplace != "codex-feishu-sync" {
 		t.Fatalf("Marketplace = %q, want codex-feishu-sync", cfg.Marketplace)
 	}
-	if !cfg.ReadOnly || !cfg.SyncAllSessions || !cfg.AutoDeleteInactiveGroups || cfg.SessionActiveHours != 72 || cfg.GroupIdleHours != 72 {
-		t.Fatalf("fresh deployment must use the 72-hour read-only lifecycle: %#v", cfg)
+	if cfg.ReadOnly || !cfg.SyncAllSessions || !cfg.AutoDeleteInactiveGroups || cfg.SessionActiveHours != 72 || cfg.GroupIdleHours != 72 {
+		t.Fatalf("fresh deployment must enable automatic continuation with the 72-hour lifecycle: %#v", cfg)
 	}
 }
 
@@ -77,5 +77,35 @@ func TestValidateRejectsUnsupportedValues(t *testing.T) {
 	cfg.Region = "unknown"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted unsupported region")
+	}
+}
+
+func TestMachineIdentityIsStableAndNotSharedBetweenInstalls(t *testing.T) {
+	firstDir, secondDir := t.TempDir(), t.TempDir()
+	first, second := Defaults(), Defaults()
+	if err := EnsureMachine(firstDir, &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureMachine(secondDir, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.MachineID == "" || first.MachineID == second.MachineID || first.MachineName == "" {
+		t.Fatal("installations did not get independent machine identities")
+	}
+	reloaded, err := Load(firstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureMachine(firstDir, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.MachineID != first.MachineID {
+		t.Fatal("machine identity changed on restart")
+	}
+	for _, interval := range []int{-1, 1, 301} {
+		reloaded.MessagePollSeconds = interval
+		if reloaded.Validate() == nil {
+			t.Fatalf("accepted invalid poll interval %d", interval)
+		}
 	}
 }

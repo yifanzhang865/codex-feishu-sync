@@ -29,7 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
-var version = "0.1.0"
+var version = "0.2.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -45,7 +45,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "setup":
-		return setup()
+		return setup(args[1:])
 	case "run":
 		return runBridge()
 	case "hook":
@@ -56,6 +56,8 @@ func run(args []string) error {
 		return listThreads()
 	case "diagnose":
 		return diagnoseAppServer()
+	case "diagnose-routing":
+		return diagnoseRouting()
 	case "status":
 		return showStatus()
 	case "install-service":
@@ -73,7 +75,15 @@ func run(args []string) error {
 	}
 }
 
-func setup() error {
+func setup(args []string) error {
+	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
+	noService := flags.Bool("no-service", false, "仅配置并安装程序，由 tmux 等方式启动")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("setup 不接受位置参数")
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("setup 需要交互式终端，以便安全输入飞书 App Secret")
 	}
@@ -159,6 +169,20 @@ func setup() error {
 	} else {
 		cfg.AutoDeleteInactiveGroups = false
 	}
+	defaultMulti := "no"
+	if cfg.MultiMachine {
+		defaultMulti = "yes"
+	}
+	multi, err := ask(reader, "多机路由（共享飞书凭据，无需网关）yes/no", defaultMulti)
+	if err != nil {
+		return err
+	}
+	cfg.MultiMachine = !strings.EqualFold(multi, "no")
+	if cfg.MultiMachine {
+		if cfg.MachineName, err = ask(reader, "本机显示名称（留空使用主机名）", cfg.MachineName); err != nil {
+			return err
+		}
+	}
 	if cfg.OwnerOpenID, err = ask(reader, "飞书 owner Open ID", cfg.OwnerOpenID); err != nil {
 		return err
 	}
@@ -212,6 +236,12 @@ func setup() error {
 		appSecret = previousCredentials.AppSecret
 	}
 	credentials := config.Credentials{AppID: strings.TrimSpace(appID), AppSecret: appSecret}
+	if credentials.AppID != previousCredentials.AppID || cfg.OwnerOpenID != previousConfig.OwnerOpenID || cfg.Region != previousConfig.Region {
+		cfg.RoutingChatID = ""
+	}
+	if err := config.EnsureMachine(configDir, &cfg); err != nil {
+		return err
+	}
 	chat, err := feishu.New(cfg, credentials)
 	if err != nil {
 		return err
@@ -221,7 +251,16 @@ func setup() error {
 	if err := chat.Check(checkCtx); err != nil {
 		return fmt.Errorf("飞书连通性检查失败：%w", err)
 	}
-	if cfg.InstalledBinary != "" {
+	if cfg.MultiMachine {
+		cfg.RoutingChatID, err = chat.EnsureRoutingChat(checkCtx)
+		if err != nil {
+			return fmt.Errorf("多机路由检查失败：%w", err)
+		}
+		if _, err := chat.ListInbound(checkCtx, cfg.RoutingChatID, time.Now().UnixMilli(), true); err != nil {
+			return err
+		}
+	}
+	if !*noService && cfg.InstalledBinary != "" {
 		if err := service.Uninstall(); err != nil {
 			return fmt.Errorf("停止现有服务以升级程序失败：%w", err)
 		}
@@ -236,6 +275,10 @@ func setup() error {
 	}
 	if err := config.SaveCredentials(configDir, credentials); err != nil {
 		return err
+	}
+	if *noService {
+		fmt.Println("飞书连接检查通过，本机配置与程序已安装。运行 codex-feishu run 或在 tmux 中启动。")
+		return nil
 	}
 	if err := service.Install(binaryPath); err != nil {
 		return fmt.Errorf("已保存本地配置，但常驻服务安装失败：%w", err)
@@ -642,12 +685,65 @@ func status(thread appserver.Thread) string {
 
 func printUsage() {
 	fmt.Println("Codex 飞书双向同步")
-	fmt.Println("  codex-feishu setup                  配置凭据、连通性检查并安装服务")
+	fmt.Println("  codex-feishu setup [--no-service]   配置凭据并安装程序；可跳过系统服务")
 	fmt.Println("  codex-feishu run                    前台运行桥接服务")
 	fmt.Println("  codex-feishu status                 查看服务状态和绑定数")
 	fmt.Println("  codex-feishu threads                列出本机可见 Codex thread")
 	fmt.Println("  codex-feishu diagnose               检查 App Server 和并行恢复能力")
+	fmt.Println("  codex-feishu diagnose-routing       检查无网关路由群及消息历史权限")
 	fmt.Println("  codex-feishu bind --thread ID --chat ID 绑定已有飞书群")
 	fmt.Println("  codex-feishu install-service        安装或重启系统服务")
 	fmt.Println("  codex-feishu uninstall [--purge-data] 停止服务并卸载插件")
+}
+
+// This checks platform permissions without starting another Codex writer or WS client.
+func diagnoseRouting() error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return err
+	}
+	if !cfg.MultiMachine {
+		return errors.New("请在配置中启用 multi_machine，或重新运行 setup")
+	}
+	if err := config.EnsureMachine(dir, &cfg); err != nil {
+		return err
+	}
+	credentials, err := config.LoadCredentials(dir)
+	if err != nil {
+		return err
+	}
+	client, err := feishu.New(cfg, credentials)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.Check(ctx); err != nil {
+		return err
+	}
+	mailbox, err := client.EnsureRoutingChat(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := client.ListInbound(ctx, mailbox, time.Now().UnixMilli(), true); err != nil {
+		return err
+	}
+	store, err := state.Open(filepath.Join(dir, "state"))
+	if err != nil {
+		return err
+	}
+	// Read bindings only; this diagnostic must not save over a live service's state.
+	for _, chatID := range store.Bindings() {
+		if _, err := client.ListInbound(ctx, chatID, time.Now().UnixMilli(), false); err != nil {
+			return err
+		}
+	}
+	// Saving credentials/config while an existing bridge is running could be
+	// overwritten by it; Run saves the discovered mailbox under its run lock.
+	fmt.Printf("无网关路由检查通过。机器：%s；路由群：%s\n", cfg.MachineName, mailbox)
+	return nil
 }

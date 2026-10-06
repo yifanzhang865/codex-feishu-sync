@@ -42,13 +42,18 @@ func (c *Client) ThreadChatCanBeDeleted(ctx context.Context, chatID, threadID st
 		}
 		return false, fmt.Errorf("飞书群状态未知 %q，暂缓回收", *response.Data.ChatStatus)
 	}
-	return matchesManagedThreadChat(response.Data, threadID), nil
+	return matchesManagedThreadChat(response.Data, threadID, c.machineID), nil
 }
 
-func matchesManagedThreadChat(chat *larkim.GetChatRespData, threadID string) bool {
+func matchesManagedThreadChat(chat *larkim.GetChatRespData, threadID string, machineID ...string) bool {
+	description := "Codex thread: " + threadID
+	matches := chat != nil && chat.Description != nil && *chat.Description == description
+	if !matches && len(machineID) > 0 && machineID[0] != "" && chat != nil && chat.Description != nil {
+		matches = *chat.Description == description+"\nCodex machine: "+machineID[0]
+	}
 	// Feishu omits owner_id when a bot owns the group. Never dismiss a
 	// group transferred to a human, or whose binding description changed.
-	return chat != nil && threadID != "" && chat.Description != nil && *chat.Description == "Codex thread: "+threadID &&
+	return chat != nil && threadID != "" && matches &&
 		chat.ChatMode != nil && *chat.ChatMode == "group" && chat.ChatType != nil && *chat.ChatType == "private" &&
 		(chat.OwnerId == nil || *chat.OwnerId == "")
 }

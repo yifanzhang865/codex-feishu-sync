@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +38,11 @@ func (b *Bridge) onServerRequest(ctx context.Context, requestID json.RawMessage,
 }
 
 func (b *Bridge) waitForApproval(ctx context.Context, requestID json.RawMessage, method string, params map[string]any, chatID string) (any, error) {
-	key := string(requestID)
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return nil, err
+	}
+	key := hex.EncodeToString(id)
 	result := make(chan string, 1)
 	pending := pendingApproval{chatID: chatID, result: result}
 	b.mu.Lock()
@@ -46,7 +52,7 @@ func (b *Bridge) waitForApproval(ctx context.Context, requestID json.RawMessage,
 	defer b.removeApproval(key, chatID)
 
 	summary := approvalSummary(method, params)
-	card, err := approvalCard(summary, key)
+	card, err := approvalCard(summary, key, b.cfg.MachineID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +146,11 @@ func (b *Bridge) waitForAnswer(ctx context.Context, threadID string, params map[
 }
 
 func (b *Bridge) onCardAction(ctx context.Context, action feishu.CardAction) error {
+	if b.cfg.MultiMachine {
+		if target, _ := action.Value["machine_id"].(string); target != "" && target != b.cfg.MachineID {
+			return nil
+		}
+	}
 	if b.cfg.ReadOnly {
 		return nil
 	}
@@ -259,7 +270,11 @@ func approvalSummary(method string, params map[string]any) string {
 	return builder.String()
 }
 
-func approvalCard(summary, requestID string) (string, error) {
+func approvalCard(summary, requestID string, machineID ...string) (string, error) {
+	machine := ""
+	if len(machineID) > 0 {
+		machine = machineID[0]
+	}
 	button := func(label, style, decision string) map[string]any {
 		return map[string]any{
 			"tag":  "button",
@@ -267,7 +282,7 @@ func approvalCard(summary, requestID string) (string, error) {
 			"type": style,
 			"behaviors": []any{map[string]any{
 				"type":  "callback",
-				"value": map[string]string{"request_id": requestID, "decision": decision},
+				"value": map[string]string{"request_id": requestID, "decision": decision, "machine_id": machine},
 			}},
 		}
 	}
