@@ -139,3 +139,52 @@ func TestListThreadsIncludesOtherProvidersAcrossPages(t *testing.T) {
 		t.Fatalf("provider filtering lost a conversation: %#v", threads)
 	}
 }
+
+func TestCallPreservesOmittedNullAndEmptyParams(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		params   any
+		present  bool
+		expected string
+	}{
+		{name: "nil"},
+		{name: "nil raw message", params: json.RawMessage(nil)},
+		{name: "empty raw message", params: json.RawMessage{}},
+		{name: "null", params: json.RawMessage(`null`), present: true, expected: "null"},
+		{name: "empty object", params: json.RawMessage(`{}`), present: true, expected: "{}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			requests, stdin := io.Pipe()
+			stdout, responses := io.Pipe()
+			defer requests.Close()
+			defer stdout.Close()
+			client := &Client{ctx: ctx, cancel: cancel, stdin: stdin, pending: make(map[string]chan rpcResult), done: make(chan struct{})}
+			defer client.Close()
+			go client.readLoop(stdout)
+			wire := make(chan map[string]json.RawMessage, 1)
+			go func() {
+				defer responses.Close()
+				var request map[string]json.RawMessage
+				if json.NewDecoder(requests).Decode(&request) != nil {
+					return
+				}
+				wire <- request
+				_ = json.NewEncoder(responses).Encode(map[string]any{"id": request["id"], "result": map[string]any{"requirements": nil}})
+			}()
+			result, err := client.Call(ctx, "configRequirements/read", test.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := <-wire
+			params, present := request["params"]
+			if present != test.present || string(params) != test.expected {
+				t.Fatalf("wire params present=%v value=%s; want present=%v value=%s", present, params, test.present, test.expected)
+			}
+			if string(result) != `{"requirements":null}` {
+				t.Fatalf("result=%s", result)
+			}
+		})
+	}
+}

@@ -14,8 +14,12 @@ func (b *Bridge) onLocalCLICall(ctx context.Context, owner, method string, raw j
 	var params struct {
 		ThreadID string `json:"threadId"`
 	}
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, err
+	// Native zero-argument methods such as configRequirements/read can omit
+	// params entirely. There is no thread identity to decode in that case.
+	if len(raw) != 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
 	}
 	if params.ThreadID != "" && control.IsWrite(method) {
 		lock := b.threadLock(params.ThreadID)

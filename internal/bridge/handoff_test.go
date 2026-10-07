@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/zhangwei/codex-feishu-sync/internal/control"
 	"github.com/zhangwei/codex-feishu-sync/internal/feishu"
 	"github.com/zhangwei/codex-feishu-sync/internal/state"
@@ -30,6 +33,8 @@ func (c *handoffBackend) Call(ctx context.Context, method string, params any) (j
 	}
 	_ = json.Unmarshal(data, &p)
 	switch method {
+	case "configRequirements/read":
+		return json.RawMessage(`{"requirements":null}`), nil
 	case "thread/resume":
 		thread, err := c.codex.ResumeThread(ctx, p.Thread)
 		if err != nil {
@@ -49,6 +54,65 @@ func (c *handoffBackend) Call(ctx context.Context, method string, params any) (j
 		return json.RawMessage(`{}`), nil
 	default:
 		return json.RawMessage(`{}`), nil
+	}
+}
+
+func TestNativeBootstrapAcceptsRequestsWithoutParams(t *testing.T) {
+	b, _, _ := handoffFixture(t)
+	if err := b.localControl.Start(b.configDir); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := control.LoadEndpoint(b.configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, response, err := websocket.DefaultDialer.Dial(endpoint.URL, http.Header{"Authorization": {"Bearer " + endpoint.Token}})
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.WriteJSON(map[string]any{"id": 1, "method": "initialize", "params": map[string]any{"clientInfo": map[string]string{"name": "codex_cli_rs"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var initReply struct {
+		Error any `json:"error"`
+	}
+	if err := conn.ReadJSON(&initReply); err != nil {
+		t.Fatal(err)
+	}
+	if initReply.Error != nil {
+		t.Fatalf("initialize failed: %v", initReply.Error)
+	}
+	for _, request := range []struct{ name, frame string }{
+		{"omitted", `{"id":2,"method":"configRequirements/read"}`},
+		{"null", `{"id":2,"method":"configRequirements/read","params":null}`},
+		{"empty object", `{"id":2,"method":"configRequirements/read","params":{}}`},
+	} {
+		t.Run(request.name, func(t *testing.T) {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(request.frame)); err != nil {
+				t.Fatal(err)
+			}
+			var reply struct {
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := conn.ReadJSON(&reply); err != nil {
+				t.Fatal(err)
+			}
+			if reply.Error != nil {
+				t.Fatalf("configRequirements/read failed: %s (code %d)", reply.Error.Message, reply.Error.Code)
+			}
+			if string(reply.Result) != `{"requirements":null}` {
+				t.Fatalf("bootstrap result changed: %s", reply.Result)
+			}
+		})
 	}
 }
 

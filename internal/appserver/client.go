@@ -107,7 +107,7 @@ func Start(ctx context.Context, executable string, notificationFn NotificationHa
 	defer initCancel()
 	client.initialization, err = client.Call(initCtx, "initialize", map[string]any{
 		"clientInfo": map[string]string{
-			"name": "codex_cli_rs", "title": "Codex Feishu Sync", "version": "0.3.0",
+			"name": "codex_cli_rs", "title": "Codex Feishu Sync", "version": "0.3.1",
 		},
 		"capabilities": map[string]bool{"experimentalApi": true},
 	})
@@ -150,7 +150,14 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 	c.pendingMu.Lock()
 	c.pending[id] = resultCh
 	c.pendingMu.Unlock()
-	message := map[string]any{"id": requestID, "method": method, "params": params}
+	message := map[string]any{"id": requestID, "method": method}
+	// Preserve parameterless frontend requests instead of inventing a params
+	// value. Explicit null and {} remain unchanged on the backend connection.
+	if raw, ok := params.(json.RawMessage); !ok || len(raw) != 0 {
+		if params != nil {
+			message["params"] = params
+		}
+	}
 	if err := c.write(message); err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, id)

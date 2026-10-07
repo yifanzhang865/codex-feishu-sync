@@ -15,10 +15,13 @@ git pull --ff-only
 tmux send-keys -t codex-feishu-sync C-c
 # 确认该会话已结束后构建；若服务本来没启动，跳过上一行。
 go build -trimpath -o "$(command -v codex-feishu)" ./cmd/codex-feishu
+codex-feishu version
 tmux new-session -d -s codex-feishu-sync 'exec codex-feishu run'
 ```
 
 新机器先按[多机部署](multi-machine.md)执行 `setup --no-service`。系统服务部署使用 `codex-feishu install-service` 重启，不与 tmux 同时运行。
+
+如果 `cli resume` 启动时出现 `configRequirements/read failed: unexpected end of JSON input`，请升级到 0.3.1 或更高版本，并重启桥接服务。旧版桥接错误地解码了原生 CLI 省略的零参数请求；此错误不需要重新配置飞书凭据。只替换可执行文件不能更新已经运行的旧服务。
 
 在项目工作目录打开新会话：
 
@@ -31,9 +34,13 @@ codex-feishu cli
 
 ```bash
 codex-feishu cli -C /path/to/your/project
+codex-feishu cli resume
+codex-feishu cli resume --all
 codex-feishu cli resume <thread_id>
 codex-feishu cli resume --last
 ```
+
+`resume` 会打开原生历史会话选择器；`--all` 会同时显示其他工作目录的会话。
 
 保留原生终端界面、对话历史和审批操作。入口会自动添加 `--remote` 和令牌环境变量，不能自行指定 `--remote`、`--remote-auth-token-env` 或 `--no-daemon`。`login`、`plugin` 等管理命令仍直接使用 `codex`。
 
@@ -77,9 +84,9 @@ go test -race ./internal/control ./internal/appserver ./internal/bridge
 在已登录的 Linux/macOS/WSL 本机上，还可验证真实原生 CLI 的启动兼容性：
 
 ```bash
-CODEX_FEISHU_NATIVE_TEST=1 go test ./internal/control -run TestNativeRemoteCLIStartup -v
+CODEX_FEISHU_NATIVE_TEST=1 go test ./internal/bridge -run TestNativeRemoteCLIStartup -v
 ```
 
-该检查使用隔离的临时 Codex 目录和伪终端，不提交模型任务，不连接飞书；需要本机安装 `python3`。它不替代实际租户中 CLI 与飞书轮流发送指令的验收。Windows/macOS 跨平台编译由 CI 检查，具体终端运行仍需目标机器验证。
+该检查使用隔离的临时 Codex 目录和伪终端，通过实际桥接入口验证省略参数的 `configRequirements/read` 请求及原生 `resume` 历史选择器。不提交模型任务，不连接飞书；需要本机安装 `python3`。它不替代实际租户中 CLI 与飞书轮流发送指令的验收。Windows/macOS 跨平台编译由 CI 检查，具体终端运行仍需目标机器验证。
 
 协议依据：[官方 App Server](https://learn.chatgpt.com/docs/app-server)、[原生 CLI 的 remote 参数](https://learn.chatgpt.com/docs/developer-commands)。
