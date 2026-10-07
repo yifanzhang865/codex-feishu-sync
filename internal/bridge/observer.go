@@ -131,6 +131,9 @@ func (b *Bridge) takeOverObserved(ctx context.Context, threadID string) error {
 	}
 	b.setControlled(threadID, true)
 	b.rememberThread(thread)
+	if b.localControl != nil {
+		b.localControl.Manage(thread)
+	}
 	b.syncHistoryOnResume(ctx, thread, false)
 	slog.Info("CLI 已释放写入权限，飞书可继续控制会话", "thread_id", threadID)
 	return nil

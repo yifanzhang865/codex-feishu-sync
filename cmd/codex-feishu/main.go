@@ -29,7 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -48,6 +48,8 @@ func run(args []string) error {
 		return setup(args[1:])
 	case "run":
 		return runBridge()
+	case "cli":
+		return runCLI(args[1:])
 	case "hook":
 		return runHook()
 	case "bind":
@@ -135,7 +137,7 @@ func setup(args []string) error {
 		if cfg.ReadOnly {
 			fmt.Println("已启用本机主会话只读同步。")
 		} else {
-			fmt.Println("已启用本机主会话同步；收到飞书指令后尝试恢复对应会话，CLI 占用时排队。")
+			fmt.Println("已启用本机主会话同步；codex-feishu cli 支持自动交接，独立 CLI 占用时仍排队。")
 		}
 		value, err := ask(reader, "纳入最近多少小时发生对话的会话（0 表示不限）", strconv.Itoa(cfg.SessionActiveHours))
 		if err != nil {
@@ -687,6 +689,7 @@ func printUsage() {
 	fmt.Println("Codex 飞书双向同步")
 	fmt.Println("  codex-feishu setup [--no-service]   配置凭据并安装程序；可跳过系统服务")
 	fmt.Println("  codex-feishu run                    前台运行桥接服务")
+	fmt.Println("  codex-feishu cli [Codex 参数]       原生 CLI，自动交接飞书控制权；支持 resume")
 	fmt.Println("  codex-feishu status                 查看服务状态和绑定数")
 	fmt.Println("  codex-feishu threads                列出本机可见 Codex thread")
 	fmt.Println("  codex-feishu diagnose               检查 App Server 和并行恢复能力")

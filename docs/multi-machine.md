@@ -15,6 +15,7 @@ export PATH="$HOME/.local/bin:$PATH"
 codex-feishu setup --no-service
 codex-feishu diagnose-routing
 tmux new-session -d -s codex-feishu-sync 'exec codex-feishu run'
+codex-feishu cli
 ```
 
 在向导中输入第一台使用的 **App ID、App Secret、owner Open ID**，多机路由选择 `yes`，本机名称填写便于区分的名称，例如 `laptop`、`gpu-server`。应用凭据不会随 Git 分发，所以每台首次部署仍需这一次配置；App Secret 在终端隐藏输入。新安装默认接受 owner 的飞书指令，需要只读同步时选择“仅同步回复” `yes`。两种模式都会发送完成通知。
@@ -33,6 +34,7 @@ tmux new-session -d -s codex-feishu-sync 'exec codex-feishu run'
 | `machine_name` | 每台独立，显示在新建会话群名中 |
 | `routing_chat_id` | 程序自动发现同一个机器人专用私有群 |
 | Codex 登录、工作目录、会话记录、`state/`、群绑定和队列 | 各机独立，不能复制或共用 |
+| CLI 控制入口 `control.json`、访问令牌、当前控制端 | 各机独立，自动生成；不能复制或共用 |
 | `read_only` | 各机独立；为 `true` 时不执行该机的群指令或审批 |
 | `message_poll_seconds` | 各机独立，默认 `5`，允许 `2`–`300` 秒 |
 
@@ -61,7 +63,7 @@ tmux new-session -d -s codex-feishu-sync 'exec codex-feishu run'
 
 若服务在提交指令时异常退出，执行结果可能无法确认。程序会提示核对本机 Codex，不盲目重放这类指令；确认后重新发送。尚未开始处理的收件箱消息可正常恢复。审批请求随 App Server 连接结束而失效，重启后需重新发起；随机请求标识防止旧卡片误批准新的请求。正常消息去重不代表远程调用在任意崩溃下都能保证严格恰好执行一次。
 
-路由不会改变 Codex 的写入权限：本机 CLI 持有会话时，飞书指令排队，CLI 正常退出后接续；只断开 tmux 不会释放 CLI。只读模式始终不接受本机群的指令。
+使用 `codex-feishu cli` 或 `codex-feishu cli resume <thread_id>` 可启用本机 CLI/飞书自动交接。这个入口只连接本机 `127.0.0.1`，无需其他机器访问；飞书跨机器路由保持原样。必须使用支持 `--remote` 的 Codex CLI，已验证 `0.159.2`。详见[自动交接](control-handoff.md)。独立启动的 `codex` 或 VS Code 仍在退出后才能释放写入权限；只断开 tmux 不会释放它们。`read_only: true` 始终不接受本机群指令。
 
 ```bash
 codex-feishu diagnose-routing

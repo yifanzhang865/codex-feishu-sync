@@ -14,6 +14,7 @@ import (
 	channel "github.com/larksuite/channel-sdk-go"
 	"github.com/zhangwei/codex-feishu-sync/internal/appserver"
 	"github.com/zhangwei/codex-feishu-sync/internal/config"
+	"github.com/zhangwei/codex-feishu-sync/internal/control"
 	"github.com/zhangwei/codex-feishu-sync/internal/events"
 	"github.com/zhangwei/codex-feishu-sync/internal/feishu"
 	"github.com/zhangwei/codex-feishu-sync/internal/hooks"
@@ -55,12 +56,14 @@ type question struct {
 type pendingApproval struct {
 	chatID string
 	result chan string
+	ctx    context.Context
 }
 
 type pendingQuestion struct {
 	chatID    string
 	questions []question
 	result    chan string
+	ctx       context.Context
 }
 
 type Bridge struct {
@@ -92,6 +95,7 @@ type Bridge struct {
 	pendingByChat    map[string]string
 	pendingQuestions map[string]*pendingQuestion
 	activityTracker  *appserver.ActivityTracker
+	localControl     *control.Server
 }
 
 func New(cfg config.Config, credentials config.Credentials, codexBin string) (*Bridge, error) {
@@ -146,6 +150,11 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	b.codex = client
 	defer client.Close()
+	b.localControl = control.New(b.ctx, client, control.Hooks{
+		Call: b.onLocalCLICall, Takeover: b.onControlTakeover, FeishuRequest: b.onFeishuServerRequest,
+	})
+	client.SetNotificationTap(b.localControl.Notify)
+	defer b.localControl.Close()
 	if err := b.recoverThreads(b.ctx); err != nil {
 		return err
 	}
@@ -174,6 +183,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	chatDone := make(chan error, 1)
 	go func() { chatDone <- b.feishu.Start(b.ctx) }()
+	if err := b.localControl.Start(b.configDir); err != nil {
+		return fmt.Errorf("启动本机 CLI 控制入口: %w", err)
+	}
+	slog.Info("本机 CLI 自动交接入口已启用，请使用 codex-feishu cli")
 	if b.cfg.SyncAllSessions {
 		discoveryDone := make(chan struct{})
 		go func() {
@@ -379,6 +392,9 @@ func (b *Bridge) resumeLocked(ctx context.Context, threadID string, catchLatest 
 			}
 		} else if err == nil {
 			b.setControlled(threadID, true)
+			if b.localControl != nil {
+				b.localControl.Manage(thread)
+			}
 		}
 	}
 	if err != nil {
@@ -469,6 +485,14 @@ func (b *Bridge) onFeishuMessage(ctx context.Context, message feishu.Inbound) er
 	b.mu.Lock()
 	busy := b.busy[threadID]
 	b.mu.Unlock()
+	// Input from the other endpoint explicitly takes over, even while the
+	// previous turn is running. Same-endpoint followups keep normal queuing.
+	if b.localControl != nil && b.localControl.Managed(threadID) {
+		busy = busy || b.localControl.ActiveTurn(threadID) != ""
+		if b.localControl.Owner(threadID) != control.Feishu {
+			busy = false
+		}
+	}
 	action, err := b.router.Route(router.Incoming{
 		EventID: message.EventID, ChatID: message.ChatID, SenderID: message.SenderID, Text: message.Text,
 	}, busy)
@@ -544,7 +568,22 @@ func (b *Bridge) submit(ctx context.Context, threadID, text string) error {
 	previousTurnID := b.turnIDs[threadID]
 	b.busy[threadID] = true
 	b.mu.Unlock()
-	turnID, err := b.codex.StartTurn(ctx, threadID, text)
+	var turnID string
+	var err error
+	if b.localControl != nil && b.localControl.Managed(threadID) {
+		var response json.RawMessage
+		params, _ := json.Marshal(map[string]any{"threadId": threadID, "input": []map[string]string{{"type": "text", "text": text}}})
+		response, err = b.localControl.Execute(ctx, control.Feishu, "turn/start", params)
+		var result struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		_ = json.Unmarshal(response, &result)
+		turnID = result.Turn.ID
+	} else {
+		turnID, err = b.codex.StartTurn(ctx, threadID, text)
+	}
 	if err != nil {
 		b.unsuppressEcho(threadID, text)
 		b.mu.Lock()
@@ -740,6 +779,12 @@ func (b *Bridge) finishTurn(ctx context.Context, threadID string, params json.Ra
 		notification.Turn.ID = b.turnIDs[threadID]
 	}
 	delete(b.turnIDs, threadID)
+	if b.localControl != nil && b.localControl.Managed(threadID) {
+		if active := b.localControl.ActiveTurn(threadID); active != "" {
+			b.busy[threadID] = true
+			b.turnIDs[threadID] = active
+		}
+	}
 	b.mu.Unlock()
 	if stream != nil {
 		if err := stream.Close(ctx); err != nil {
@@ -787,6 +832,11 @@ func (b *Bridge) drainQueue(ctx context.Context, threadID string) {
 func (b *Bridge) drainQueueLocked(ctx context.Context, threadID string) {
 	if b.cfg.ReadOnly {
 		return
+	}
+	if b.localControl != nil && b.localControl.Managed(threadID) {
+		if b.localControl.Owner(threadID) != control.Feishu || b.localControl.ActiveTurn(threadID) != "" {
+			return
+		}
 	}
 	queued, err := b.store.Dequeue(threadID)
 	if err != nil || len(queued) == 0 {

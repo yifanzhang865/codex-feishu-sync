@@ -1,12 +1,90 @@
 package appserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
 )
+
+type responseBuffer struct{ bytes.Buffer }
+
+func (*responseBuffer) Close() error { return nil }
+
+func TestGuardedApprovalIsCheckedAtWireWrite(t *testing.T) {
+	for _, revoked := range []bool{false, true} {
+		output := &responseBuffer{}
+		checked := false
+		client := &Client{ctx: context.Background(), stdin: output, requestFn: func(context.Context, json.RawMessage, string, json.RawMessage) (any, error) {
+			return GuardedResponse(func(send func(any, error) error) error {
+				checked = true
+				if revoked {
+					return send(nil, errors.New("lease revoked"))
+				}
+				return send(map[string]string{"decision": "accept"}, nil)
+			}), nil
+		}}
+		client.handleServerRequest(rpcMessage{ID: json.RawMessage(`7`), Method: "item/fileChange/requestApproval", Params: json.RawMessage(`{}`)})
+		var reply rpcMessage
+		if err := json.Unmarshal(output.Bytes(), &reply); err != nil {
+			t.Fatal(err)
+		}
+		if !checked || string(reply.ID) != "7" {
+			t.Fatal("guard bypassed or request id changed")
+		}
+		if revoked && (reply.Error == nil || len(reply.Result) != 0) {
+			t.Fatal("revoked approval sent acceptance")
+		}
+		if !revoked && (reply.Error != nil || string(reply.Result) != `{"decision":"accept"}`) {
+			t.Fatal("valid approval response corrupted")
+		}
+	}
+}
+
+func TestSlowNotificationsDoNotBlockHandoffCompletionTap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	blocked := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	completion := make(chan struct{}, 1)
+	client := &Client{ctx: ctx, done: make(chan struct{}), pending: make(map[string]chan rpcResult), notificationWake: make(chan struct{}, 1), notificationFn: func(string, json.RawMessage) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-blocked
+	}}
+	client.SetNotificationTap(func(method string, _ json.RawMessage) {
+		if method == "turn/completed" {
+			completion <- struct{}{}
+		}
+	})
+	go client.readLoop(reader)
+	go client.notificationLoop()
+	defer close(blocked)
+	go func() {
+		encoder := json.NewEncoder(writer)
+		_ = encoder.Encode(map[string]any{"method": "turn/started", "params": map[string]string{"threadId": "thread-a"}})
+		<-entered
+		for i := 0; i < 1300; i++ {
+			if encoder.Encode(map[string]any{"method": "item/agentMessage/delta", "params": map[string]string{"threadId": "thread-a", "delta": "output"}}) != nil {
+				return
+			}
+		}
+		_ = encoder.Encode(map[string]any{"method": "turn/completed", "params": map[string]string{"threadId": "thread-a"}})
+	}()
+	select {
+	case <-completion:
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow bridge blocked completion behind its notification backlog")
+	}
+}
 
 func TestListThreadsIncludesOtherProvidersAcrossPages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

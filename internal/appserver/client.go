@@ -20,6 +20,10 @@ import (
 type NotificationHandler func(method string, params json.RawMessage)
 type ServerRequestHandler func(context.Context, json.RawMessage, string, json.RawMessage) (any, error)
 
+// GuardedResponse lets an arbiter validate its lease atomically with the wire
+// write, closing the race between a handler returning and an ownership change.
+type GuardedResponse func(send func(any, error) error) error
+
 type rpcMessage struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -34,25 +38,41 @@ type rpcError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+// RPCError preserves protocol errors for clients sharing this connection.
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("app-server request failed (%d): %s", e.Code, e.Message)
+}
+
 type rpcResult struct {
 	result json.RawMessage
 	err    error
 }
 
 type Client struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	command        *exec.Cmd
-	stdin          io.WriteCloser
-	writeMu        sync.Mutex
-	pendingMu      sync.Mutex
-	pending        map[string]chan rpcResult
-	sequence       atomic.Uint64
-	notifications  chan rpcMessage
-	notificationFn NotificationHandler
-	requestFn      ServerRequestHandler
-	closeOnce      sync.Once
-	done           chan struct{}
+	ctx               context.Context
+	cancel            context.CancelFunc
+	command           *exec.Cmd
+	stdin             io.WriteCloser
+	writeMu           sync.Mutex
+	pendingMu         sync.Mutex
+	pending           map[string]chan rpcResult
+	sequence          atomic.Uint64
+	notificationMu    sync.Mutex
+	notificationQueue []rpcMessage
+	notificationWake  chan struct{}
+	notificationFn    NotificationHandler
+	requestFn         ServerRequestHandler
+	closeOnce         sync.Once
+	done              chan struct{}
+	initialization    json.RawMessage
+	tapMu             sync.RWMutex
+	notificationTap   NotificationHandler
 }
 
 func Start(ctx context.Context, executable string, notificationFn NotificationHandler, requestFn ServerRequestHandler) (*Client, error) {
@@ -78,16 +98,16 @@ func Start(ctx context.Context, executable string, notificationFn NotificationHa
 	}
 	client := &Client{
 		ctx: processCtx, cancel: cancel, command: cmd, stdin: stdin,
-		pending: make(map[string]chan rpcResult), notifications: make(chan rpcMessage, 1024),
+		pending: make(map[string]chan rpcResult), notificationWake: make(chan struct{}, 1),
 		notificationFn: notificationFn, requestFn: requestFn, done: make(chan struct{}),
 	}
 	go client.readLoop(stdout)
 	go client.notificationLoop()
 	initCtx, initCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer initCancel()
-	_, err = client.Call(initCtx, "initialize", map[string]any{
+	client.initialization, err = client.Call(initCtx, "initialize", map[string]any{
 		"clientInfo": map[string]string{
-			"name": "codex-feishu-sync", "title": "Codex Feishu Sync", "version": "0.1.0",
+			"name": "codex_cli_rs", "title": "Codex Feishu Sync", "version": "0.3.0",
 		},
 		"capabilities": map[string]bool{"experimentalApi": true},
 	})
@@ -100,6 +120,19 @@ func Start(ctx context.Context, executable string, notificationFn NotificationHa
 		return nil, err
 	}
 	return client, nil
+}
+
+func (c *Client) Initialization() json.RawMessage {
+	return append(json.RawMessage(nil), c.initialization...)
+}
+
+// The tap runs in the reader before slow notification consumers. It must not
+// block: handoff waits must be able to observe completion while bridge locks
+// are held and Feishu is still delivering the previous turn's output.
+func (c *Client) SetNotificationTap(handler NotificationHandler) {
+	c.tapMu.Lock()
+	c.notificationTap = handler
+	c.tapMu.Unlock()
 }
 
 func appServerCommand(ctx context.Context, executable string) *exec.Cmd {
@@ -248,14 +281,18 @@ func (c *Client) SteerTurn(ctx context.Context, threadID, turnID, text string) (
 
 func responseTurnID(response json.RawMessage) string {
 	var result struct {
-		Turn struct {
+		TurnID string `json:"turnId"`
+		Turn   struct {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
 	if json.Unmarshal(response, &result) != nil {
 		return ""
 	}
-	return result.Turn.ID
+	if result.Turn.ID != "" {
+		return result.Turn.ID
+	}
+	return result.TurnID
 }
 
 func (c *Client) InterruptTurn(ctx context.Context, threadID, turnID string) error {
@@ -290,10 +327,21 @@ func (c *Client) readLoop(reader io.Reader) {
 				go c.handleServerRequest(message)
 				continue
 			}
+			c.tapMu.RLock()
+			tap := c.notificationTap
+			c.tapMu.RUnlock()
+			if tap != nil {
+				tap(message.Method, message.Params)
+			}
+			// Never block the RPC reader behind a slow Feishu delivery. In
+			// particular an interrupt's completion must reach the tap even if
+			// the bridge is holding its thread lock during a handoff.
+			c.notificationMu.Lock()
+			c.notificationQueue = append(c.notificationQueue, message)
+			c.notificationMu.Unlock()
 			select {
-			case c.notifications <- message:
-			case <-c.ctx.Done():
-				return
+			case c.notificationWake <- struct{}{}:
+			default:
 			}
 			continue
 		}
@@ -309,7 +357,7 @@ func (c *Client) readLoop(reader io.Reader) {
 			continue
 		}
 		if message.Error != nil {
-			resultCh <- rpcResult{err: fmt.Errorf("app-server %s (%d): %s", "request failed", message.Error.Code, message.Error.Message)}
+			resultCh <- rpcResult{err: &RPCError{Code: message.Error.Code, Message: message.Error.Message, Data: message.Error.Data}}
 		} else {
 			resultCh <- rpcResult{result: message.Result}
 		}
@@ -326,11 +374,26 @@ func (c *Client) readLoop(reader io.Reader) {
 
 func (c *Client) notificationLoop() {
 	for {
-		select {
-		case message := <-c.notifications:
+		if c.ctx.Err() != nil {
+			return
+		}
+		c.notificationMu.Lock()
+		if len(c.notificationQueue) != 0 {
+			message := c.notificationQueue[0]
+			c.notificationQueue[0] = rpcMessage{}
+			c.notificationQueue = c.notificationQueue[1:]
+			if len(c.notificationQueue) == 0 {
+				c.notificationQueue = nil
+			}
+			c.notificationMu.Unlock()
 			if c.notificationFn != nil {
 				c.notificationFn(message.Method, message.Params)
 			}
+			continue
+		}
+		c.notificationMu.Unlock()
+		select {
+		case <-c.notificationWake:
 		case <-c.done:
 			return
 		case <-c.ctx.Done():
@@ -345,6 +408,15 @@ func (c *Client) handleServerRequest(message rpcMessage) {
 		return
 	}
 	result, err := c.requestFn(c.ctx, message.ID, message.Method, message.Params)
+	if guarded, ok := result.(GuardedResponse); ok && err == nil {
+		_ = guarded(func(value any, responseErr error) error {
+			if responseErr != nil {
+				return c.RespondError(message.ID, -32000, responseErr.Error())
+			}
+			return c.Respond(message.ID, value)
+		})
+		return
+	}
 	if err != nil {
 		_ = c.RespondError(message.ID, -32000, err.Error())
 		return

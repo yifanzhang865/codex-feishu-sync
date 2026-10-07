@@ -13,6 +13,17 @@ import (
 )
 
 func (b *Bridge) onServerRequest(ctx context.Context, requestID json.RawMessage, method string, raw json.RawMessage) (any, error) {
+	var identity struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(raw, &identity)
+	if b.localControl != nil && b.localControl.Managed(identity.ThreadID) {
+		return b.localControl.Request(ctx, requestID, method, raw)
+	}
+	return b.onFeishuServerRequest(ctx, requestID, method, raw)
+}
+
+func (b *Bridge) onFeishuServerRequest(ctx context.Context, requestID json.RawMessage, method string, raw json.RawMessage) (any, error) {
 	if b.cfg.ReadOnly {
 		return nil, errReadOnly
 	}
@@ -44,7 +55,7 @@ func (b *Bridge) waitForApproval(ctx context.Context, requestID json.RawMessage,
 	}
 	key := hex.EncodeToString(id)
 	result := make(chan string, 1)
-	pending := pendingApproval{chatID: chatID, result: result}
+	pending := pendingApproval{chatID: chatID, result: result, ctx: ctx}
 	b.mu.Lock()
 	b.pendingApprovals[key] = pending
 	b.pendingByChat[chatID] = key
@@ -120,7 +131,7 @@ func (b *Bridge) waitForAnswer(ctx context.Context, threadID string, params map[
 		prompt.WriteString("按问题顺序逐行回复。")
 	}
 	result := make(chan string, 1)
-	pending := &pendingQuestion{chatID: chatID, questions: visible, result: result}
+	pending := &pendingQuestion{chatID: chatID, questions: visible, result: result, ctx: ctx}
 	b.mu.Lock()
 	if b.pendingQuestions[threadID] != nil {
 		b.mu.Unlock()
@@ -169,7 +180,7 @@ func (b *Bridge) onCardAction(ctx context.Context, action feishu.CardAction) err
 	b.mu.Lock()
 	pending, ok := b.pendingApprovals[requestID]
 	b.mu.Unlock()
-	if !ok || pending.chatID != action.ChatID {
+	if !ok || pending.chatID != action.ChatID || (pending.ctx != nil && pending.ctx.Err() != nil) {
 		return nil
 	}
 	select {
@@ -202,7 +213,7 @@ func (b *Bridge) handleApprovalText(ctx context.Context, message feishu.Inbound)
 	b.mu.Lock()
 	pending, exists := b.pendingApprovals[requestID]
 	b.mu.Unlock()
-	if exists {
+	if exists && (pending.ctx == nil || pending.ctx.Err() == nil) {
 		select {
 		case pending.result <- decision:
 		default:
@@ -215,7 +226,7 @@ func (b *Bridge) pendingQuestionForChat(chatID string) *pendingQuestion {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, pending := range b.pendingQuestions {
-		if pending.chatID == chatID {
+		if pending.chatID == chatID && (pending.ctx == nil || pending.ctx.Err() == nil) {
 			return pending
 		}
 	}
@@ -226,6 +237,9 @@ func (b *Bridge) pendingApprovalForChat(chatID string) (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	requestID, ok := b.pendingByChat[chatID]
+	if pending, exists := b.pendingApprovals[requestID]; exists && pending.ctx != nil && pending.ctx.Err() != nil {
+		return "", false
+	}
 	return requestID, ok
 }
 
